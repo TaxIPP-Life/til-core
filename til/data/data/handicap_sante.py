@@ -34,7 +34,7 @@ def compute_nans_and_missing_values(dataframe, column):
             missing_values = 0
         if nans != 0 or missing_values != 0:
             message = 'Variable {} has {} nans and {} missing values (= {})'.format(
-                column, nans, missing_values, missing)
+                column, nans, missing_values, int(round(missing)) if missing is not None else None)
             print message
         return nans, missing_values, missing
 
@@ -55,7 +55,7 @@ def load_dataframe():
     survey = survey_collection.get_survey('hsi_hsi_2009')
     # CDATCO; Ancienneté de la vie en couple
     # CDATDC: Année de décès du conjoint
-    famille_variables = ['ident_ind', 'cdatco', 'cdatdc', 'cdatse']
+    famille_variables = ['ident_ind', 'cdatco', 'cdatdc', 'cdatse', 'couple']
     # CDATSE: Année de la séparation effective
     individus_variables = ['age', 'ident_ind', 'poids_hsi', 'sexe', 'etamatri']
     revenus_alloc_reconn_variables = ['ident_ind', 'rgir']
@@ -65,7 +65,8 @@ def load_dataframe():
 
     famille = survey.get_values(table = 'g_famille', variables = famille_variables)
     individus = survey.get_values(table = 'individus', variables = individus_variables)
-    revenus_alloc_reconn = survey.get_values(table = 'l_revenus_alloc_reconn', variables = revenus_alloc_reconn_variables)
+    revenus_alloc_reconn = survey.get_values(
+        table = 'l_revenus_alloc_reconn', variables = revenus_alloc_reconn_variables)
     scolarite = survey.get_values(table = 'j_scolarite', variables = scolarite_variables)
 
     dataframes = [famille, revenus_alloc_reconn, scolarite]
@@ -78,8 +79,54 @@ def load_dataframe():
     return result
 
 
+def impute_value(dataframe, endogeneous_variable, exogeneous_variables):
+    assert 'age' in dataframe.columns
+    rhs = None
+    for exogeneous_variable in exogeneous_variables:
+        rhs = rhs + " + " + exogeneous_variable if rhs is not None else exogeneous_variable
+    formula = '{} ~ {}'.format(endogeneous_variable, rhs)
+
+    cleared_dataframe = dataframe.copy()
+    for variable in [endogeneous_variable] + exogeneous_variables:
+        nans, missing_values, missing = compute_nans_and_missing_values(dataframe, variable)
+        if nans != 0:
+            cleared_dataframe = cleared_dataframe[cleared_dataframe[variable].notnull()].copy()
+        if missing_values != 0:
+            cleared_dataframe = cleared_dataframe[cleared_dataframe[variable] != missing].copy()
+
+    y, X = patsy.dmatrices(formula, data = cleared_dataframe, return_type='dataframe')
+    mod = sm.OLS(y, X)    # Describe model
+    res = mod.fit()       # Fit model
+    # print res.summary()   # Summarize model
+    error_variance = res.scale # the square root of `scale` is often called the standard error of the regression
+
+    missing_dataframe = dataframe.copy()
+    nans, missing_values, missing = compute_nans_and_missing_values(dataframe, endogeneous_variable)
+    if missing_values != 0:
+        missing_dataframe = missing_dataframe[missing_dataframe[endogeneous_variable] == missing].copy()
+
+    for variable in exogeneous_variables:
+        nans, missing_values, missing = compute_nans_and_missing_values(dataframe, variable)
+        if nans != 0:
+            missing_dataframe = missing_dataframe[missing_dataframe[variable].notnull()].copy()
+        if missing_values != 0:
+            missing_dataframe = missing_dataframe[missing_dataframe[variable] != missing].copy()
+
+    y, X = patsy.dmatrices(formula, data = missing_dataframe, return_type='dataframe')
+
+    predicted_dataframe = pandas.DataFrame(
+        {endogeneous_variable: numpy.round(
+            res.predict(X) + numpy.sqrt(error_variance) * numpy.random.randn(len(X.index))
+            )},
+        index = X.index)
+
+    imputed_dataframe = dataframe.copy()
+    imputed_dataframe.update(predicted_dataframe)
+    return imputed_dataframe
+
+
 def renaming(dataframe):
-    dataframe = result
+    result = dataframe
     result.sexe = result.sexe - 1
 
     new_by_old_name = dict(
@@ -118,53 +165,20 @@ def renaming(dataframe):
     assert (result.civilstate.isin(range(0, 5) + [9])).all()
     assert (result.dur_in_couple >= -1).all()
     assert (result.dur_out_couple >= -1).all()
-
+    return result
 
 if __name__ == "__main__":
     dataframe = load_dataframe()
 
-def impute_value_from_cohort(dataframe, endogeneous_variable, exogeneous_variables):
-    endogeneous_variable = 'cdatco'
-    exogeneous_variables = ['agfinetu', 'age', 'sexe', 'etamatri']
-    assert 'age' in dataframe.columns
-    rhs = None
-    for exogeneous_variable in exogeneous_variables:
-        rhs = rhs + " + " + exogeneous_variable if rhs is not None else exogeneous_variable
-    formula = '{} ~ {}'.format(endogeneous_variable, rhs)
-
-    cleared_dataframe = dataframe.copy()
-    for variable in [endogeneous_variable] + exogeneous_variables:
-        nans, missing_values, missing = compute_nans_and_missing_values(dataframe, variable)
-        if nans != 0:
-            cleared_dataframe = cleared_dataframe[cleared_dataframe[variable].notnull()].copy()
-        if missing_values != 0:
-            cleared_dataframe = cleared_dataframe[cleared_dataframe[variable] != missing].copy()
-
-    y, X = patsy.dmatrices(formula, data = cleared_dataframe, return_type='dataframe')
-    mod = sm.OLS(y, X)    # Describe model
-    res = mod.fit()       # Fit model
-    # print res.summary()   # Summarize model
-    error_variance = res.scale # the square root of `scale` is often called the standard error of the regression
-
-    missing_dataframe = dataframe.copy()
-    nans, missing_values, missing = compute_nans_and_missing_values(dataframe, endogeneous_variable)
-    if missing_values != 0:
-        missing_dataframe = missing_dataframe[missing_dataframe[endogeneous_variable] == missing].copy()
-
-    for variable in exogeneous_variables:
-        nans, missing_values, missing = compute_nans_and_missing_values(dataframe, variable)
-        if nans != 0:
-            missing_dataframe = missing_dataframe[missing_dataframe[variable].notnull()].copy()
-        if missing_values != 0:
-            missing_dataframe = missing_dataframe[missing_dataframe[variable] != missing].copy()
-
-    y, X = patsy.dmatrices(formula, data = missing_dataframe, return_type='dataframe')
-
-    predicted_dataframe = pandas.DataFrame(
-        numpy.round(
-            res.predict(X) + numpy.sqrt(error_variance) * numpy.random.randn(len(X.index))
-            ),
-        index = X.index)
+    exogeneous_variables = ['age', 'sexe']
+    imputed_dataframe  = dataframe.copy()
+    for endogeneous_variable in ['cdatco', 'cdatse', 'agfinetu']:
+        print '_____ {} ____'.format(endogeneous_variable)
+        compute_nans_and_missing_values(imputed_dataframe, endogeneous_variable)
+        print '==='
+        imputed_dataframe = impute_value(imputed_dataframe, endogeneous_variable, exogeneous_variables)
+        nans, missing_values, missing = compute_nans_and_missing_values(imputed_dataframe, endogeneous_variable)
+        print missing_values
 
 
 
