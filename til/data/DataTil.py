@@ -30,10 +30,32 @@ log = logging.getLogger(__name__)
 # entiers, le second celui des floats
 variables_til = {
     'individus': (
-        ['age_en_mois', 'sexe', 'idmen', 'quimen', 'idfoy', 'quifoy', 'tuteur', 'pere', 'mere', 'partner', 'civilstate',
-         'findet', 'workstate', 'xpr', 'anc'],
-        ['salaire_imposable', 'rsti', 'choi', 'tauxprime']
+        [
+            'age_en_mois',
+            'anc',
+            'civilstate',
+            'findet',
+            'idfoy',
+            'idmen',
+            'mere',
+            'partner',
+            'pere',
+            'quifoy',
+            'quimen',
+            'sexe',
+            'tuteur',
+            'workstate',
+            'xpr',
+            ],
+        [
+            'choi',
+            'rsti',
+            'salaire_imposable',
+            'tauxprime',
+            ]
         ),
+    'individus_institutions':
+        ([], []),
     'menages': (
         ['pref'],
         []
@@ -43,9 +65,28 @@ variables_til = {
         []
         ),
     'futur': (
-        ['age_en_mois', 'sexe', 'idmen', 'quimen', 'idfoy', 'quifoy', 'pere', 'mere', 'partner', 'civilstate', 'findet',
-            'workstate', 'xpr', 'anc', 'deces'],
-        ['salaire_imposable', 'rsti', 'choi']
+        [
+            'age_en_mois',
+            'anc',
+            'civilstate',
+            'deces'
+            'findet',
+            'idfoy',
+            'idmen',
+            'mere',
+            'partner',
+            'pere',
+            'quifoy',
+            'quimen',
+            'sexe',
+            'workstate',
+            'xpr',
+            ],
+        [
+            'choi'
+            'rsti',
+            'salaire_imposable',
+            ]
         ),
     'past': (
         [],
@@ -194,7 +235,7 @@ class DataTil(object):
             ]
         individus.loc[partner['partner'].values, 'idfoy'] = partner['idfoy'].values
 
-        # (b) - Rattachements de leurs enfants (en priorité sur la décla du père)
+        # (b) - Rattachements de leurs enfants (en priorité sur la déclaration du père)
         for parent in ['pere', 'mere']:
             pac_par = individus.loc[
                 (individus['quifoy'] == 2) & (individus[parent] != -1) & (individus['idfoy'] == -1),
@@ -265,8 +306,10 @@ class DataTil(object):
         Certaines personnes se déclarent en couple avec quelqu'un ne vivant pas au domicile, on les reconstruit ici.
         Cette étape peut s'assimiler à de la fermeture de l'échantillon.
         On séléctionne les individus qui se déclare en couple avec quelqu'un hors du domicile.
-        On match mariés,pacsé d'un côté et sans contrat de l'autre. Dit autrement, si on ne trouve pas de partenaire à une personne mariée ou pacsé on change son statut de couple.
-        Comme pour les liens parents-enfants, on néglige ici la possibilité que le conjointsoit hors champ (étrange, prison, casernes, etc).
+        On match mariés,pacsé d'un côté et sans contrat de l'autre.
+        Dit autrement, si on ne trouve pas de partenaire à une personne mariée ou pacsé on change son statut de couple.
+        Comme pour les liens parents-enfants, on néglige ici la possibilité que le conjoint soit hors champ
+        (étrange, prison, casernes, etc).
         Calcul aussi la variable individus['nb_enf']
         '''
         raise NotImplementedError()
@@ -315,7 +358,7 @@ class DataTil(object):
 
         # 3- Nouvelles pondérations (qui seront celles associées aux individus après réplication)
         menages['pond'] = menages['pond'].div(menages['nb_rep'])
-        # TO DO: réflechir pondération des personnes en collectivité pour l'instant = 1
+        # TODO: réflechir pondération des personnes en collectivité pour l'instant = 1
         menages.loc[menages['id'] < 10, 'pond'] = 1
         men_exp = replicate(menages)
 
@@ -332,7 +375,9 @@ class DataTil(object):
             foy_exp = None
 
         if par is not None:
-            par = merge(menages[['id', 'nb_rep']], par, left_on = 'id', right_on='idmen', how='inner', suffixes=('_men', ''))
+            par = merge(
+                menages[['id', 'nb_rep']], par, left_on = 'id', right_on='idmen', how='inner', suffixes=('_men', '')
+                )
             par_exp = replicate(par)
             par_exp['idmen'] = new_link_with_men(par, men_exp, 'idmen')
         else:
