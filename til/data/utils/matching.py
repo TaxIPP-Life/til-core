@@ -68,7 +68,7 @@ class Matching(object):
         table2 = self.table2
         index_init = self.table1.index
         if orderby is not None:
-            table1 = self.table1.sort(orderby)
+            table1 = self.table1.sort_values(by = orderby)
         else:
             table1 = self.table1.loc[np.random.permutation(index_init)]
         index_init = table1.index
