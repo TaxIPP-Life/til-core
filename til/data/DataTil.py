@@ -35,6 +35,7 @@ variables_til = {
             'anc',
             'civilstate',
             'findet',
+            'data_origin',
             'idfoy',
             'idmen',
             'mere',
@@ -69,6 +70,7 @@ variables_til = {
             'age_en_mois',
             'anc',
             'civilstate',
+            'data_origin',
             'deces'
             'findet',
             'idfoy',
@@ -553,13 +555,13 @@ class DataTil(object):
         futur = self.time_data_frame_by_name.get('futur')
         past = self.time_data_frame_by_name.get('past')
         assert all(individus['workstate'].isin(range(1, 12)))
-        assert all(individus['civilstate'].isin(range(1, 6)))
-
+        assert all(individus['civilstate'].isin(range(1, 6))), 'civilstate should be in {} and values are {}'.format(
+            range(1, 6), individus['civilstate'].value_counts(dropna = False))
         # Foyers et ménages bien attribués
         assert sum((individus['idfoy'] == -1)) == 0
         assert sum((individus['idmen'] == -1)) == 0
         log.info(u"Nombre de personnes dans ménages ordinaires: {}".format((individus['idmen'] > 9).sum()))
-        log.info(u"Nombre de personnes vivant au sein de collectivités: {}".format((individus['idmen'] < 10).sum()))
+        # log.info(u"Nombre de personnes vivant au sein de collectivités: {}".format((individus['idmen'] < 10).sum()))
 
         # On vérifie qu'on a un et un seul qui = 0 et au plus un qui = 1 pour foy et men
         for entity_id, entity_role in [('idmen', 'quimen'), ('idfoy', 'quifoy')]:
