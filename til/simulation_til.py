@@ -1,4 +1,5 @@
-# encoding: utf-8
+# -*- coding:utf-8 -*-
+
 from __future__ import print_function, division
 
 
@@ -10,8 +11,10 @@ import time
 import warnings
 
 import numpy as np
+from pandas import DataFrame, HDFStore
 import tables
 import yaml
+
 
 # Monkey patching liam2
 from liam2.exprtools import functions
@@ -19,15 +22,23 @@ from liam2.exprtools import functions
 from til import exprmisc
 functions.update(exprmisc.functions)
 
+from liam2.expr import type_to_idx
+type_to_idx.update({
+    np.int8: 1,
+    np.int16: 1,
+    np.int32: 1
+    })
+
 
 # TilSimulation specific import
 from liam2 import config, console
 from liam2.context import EvaluationContext
-from liam2.data import VoidSource, H5Source, H5Sink
+from liam2.data import H5Data, Void
 from liam2.entities import Entity, global_symbols
-from liam2.utils import (time2str, timed, gettime, validate_dict, field_str_to_type, fields_yaml_to_type,
-     UserDeprecationWarning)
-from liam2.simulation import (expand_periodic_fields, handle_imports, show_top_processes, Simulation)
+from liam2.utils import (
+field_str_to_type, fields_yaml_to_type, gettime, time2str, timed, validate_dict
+)
+from liam2.simulation import expand_periodic_fields, handle_imports, show_top_processes, Simulation
 
 
 from til.utils import addmonth, time_period
@@ -93,9 +104,9 @@ class TilSimulation(Simulation):
             },
         '#simulation': {
             'init': [{
-                '*': [str]
+                '*': [None]  # Or(str, [str, int])
                 }],
-            'processes': [{
+            '#processes': [{
                 '*': [None]  # Or(str, [str, int])
                 }],
             'random_seed': int,
@@ -117,30 +128,29 @@ class TilSimulation(Simulation):
             'retro': bool,
             'logging': {
                 'timings': bool,
-                'level': str,  # Or('periods', 'functions', 'processes')
-            },
+                'level': str,  # Or('periods', 'procedures', 'processes')
+                },
             '#periods': int,
             'start_period': int,
             'init_period': int,
             'skip_shows': bool,
-            'timings': bool,    # deprecated
-            'assertions': str,  # Or('raise', 'warn', 'skip')
+            'timings': bool,      # deprecated
+            'assertions': str,
             'default_entity': str,
             'autodump': None,
-            'autodiff': None,
-            'runs': int,
+            'autodiff': None
             }
         }
 
     def __init__(self, globals_def, periods, start_period, init_processes,
-                 processes, entities, input_method, input_path, output_path,
-                 default_entity=None, runs=1, legislation = None, final_stat = False,
+                 processes, entities, data_source, default_entity=None,
+                 legislation = None, final_stat = False,
                  time_scale = 'year0', retro = False, uniform_weight = None):
+        # time_scale year0: default liam2
+        # time_scale year: Alexis
+        # FIXME: what if period has been declared explicitly?
         if 'periodic' in globals_def:
-            declared_fields = globals_def['periodic']['fields']
-            fnames = {fname for fname, type_ in declared_fields}
-            if 'PERIOD' not in fnames:
-                declared_fields.insert(0, ('PERIOD', int))
+            globals_def['periodic']['fields'].insert(0, ('PERIOD', int))
 
         self.globals_def = globals_def
         self.periods = periods
@@ -159,66 +169,56 @@ class TilSimulation(Simulation):
         # processes is a list of tuple: (process, periodicity, start)
         self.processes = processes
         self.entities = entities
-        self.time_scale = time_scale
-        self.retro = retro
-
-        if input_method == 'h5':
-            data_source = H5Source(input_path)
-        elif input_method == 'void':
-            data_source = VoidSource()
-        else:
-            raise ValueError("'%s' is an invalid value for 'method'. It should "
-                             "be either 'h5' or 'void'")
-
         self.data_source = data_source
-        self.data_sink = H5Sink(output_path)
         self.default_entity = default_entity
-
+        self.legislation = legislation
+        self.final_stat = final_stat
+        self.time_scale = time_scale
+        self.longitudinal = {}
+        self.retro = retro
         self.stepbystep = False
-        self.runs = runs
+
+        if uniform_weight is not None:
+            self.uniform_weight = uniform_weight
 
     @classmethod
-    def from_str(cls, yaml_str, simulation_dir='',
-                 input_dir=None, input_file=None,
-                 output_dir=None, output_file=None,
-                 start_period=None, periods=None, seed=None,
-                 skip_shows=None, skip_timings=None, log_level=None,
-                 assertions=None, autodump=None, autodiff=None,
-                 runs=None):
-        content = yaml.load(yaml_str)
+    def from_yaml(cls, fpath, input_dir = None, input_file = None, output_dir = None, output_file = None):
+        simulation_path = os.path.abspath(fpath)
+        simulation_dir = os.path.dirname(simulation_path)
+        with open(fpath) as f:
+            content = yaml.load(f)
+
         expand_periodic_fields(content)
         content = handle_imports(content, simulation_dir)
+
         validate_dict(content, cls.yaml_layout)
 
         # the goal is to get something like:
-        # globals_def = {'periodic': {'fields': [('a': int), ...], ...},
-        #                'MIG': {'type': int}}
-        globals_def = {}
+        # globals_def = {'periodic': [('a': int), ...],
+        #                'MIG': int}
+        globals_def = content.get('globals', {})
         for k, v in content.get('globals', {}).iteritems():
             if "type" in v:
                 v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
             else:
-                # TODO: fields should be optional (would use all the fields
+                #TODO: fields should be optional (would use all the fields
                 # provided in the file)
                 v["fields"] = fields_yaml_to_type(v["fields"])
             globals_def[k] = v
 
         simulation_def = content['simulation']
-        if seed is None:
-            seed = simulation_def.get('random_seed')
+        seed = simulation_def.get('random_seed')
         if seed is not None:
             seed = int(seed)
             print("using fixed random seed: %d" % seed)
             random.seed(seed)
             np.random.seed(seed)
 
+        periods = simulation_def['periods']
         time_scale = simulation_def.get('time_scale', 'year0')
         retro = simulation_def.get('retro', False)
 
-        if periods is None:
-            periods = simulation_def['periods']
-        if start_period is None:
-            start_period = simulation_def['start_period']
+        start_period = simulation_def.get('start_period', None)
         init_period = simulation_def.get('init_period', None)
 
         if start_period is None and init_period is None:
@@ -235,38 +235,20 @@ class TilSimulation(Simulation):
             print('init_period')
             print(init_period)
 
-        if skip_shows is None:
-            skip_shows = simulation_def.get('skip_shows', config.skip_shows)
-        config.skip_shows = skip_shows
-        if assertions is None:
-            assertions = simulation_def.get('assertions', config.assertions)
+        config.skip_shows = simulation_def.get('skip_shows', config.skip_shows)
         # TODO: check that the value is one of "raise", "skip", "warn"
-        config.assertions = assertions
+        config.assertions = simulation_def.get('assertions', config.assertions)
 
         logging_def = simulation_def.get('logging', {})
-        if log_level is None:
-            log_level = logging_def.get('level', config.log_level)
-        config.log_level = log_level
-        if config.log_level == 'procedures':
-            config.log_level = 'functions'
-            warnings.warn("'procedures' logging.level is deprecated, "
-                          "please use 'functions' instead",
-                          UserDeprecationWarning)
-
+        config.log_level = logging_def.get('level', config.log_level)
         if 'timings' in simulation_def:
             warnings.warn("simulation.timings is deprecated, please use "
                           "simulation.logging.timings instead",
-                          UserDeprecationWarning)
+                          DeprecationWarning)
             config.show_timings = simulation_def['timings']
+        config.show_timings = logging_def.get('timings', config.show_timings)
 
-        if skip_timings:
-            show_timings = False
-        else:
-            show_timings = logging_def.get('timings', config.show_timings)
-        config.show_timings = show_timings
-
-        if autodump is None:
-            autodump = simulation_def.get('autodump')
+        autodump = simulation_def.get('autodump', None)
         if autodump is True:
             autodump = 'autodump.h5'
         if isinstance(autodump, basestring):
@@ -274,8 +256,7 @@ class TilSimulation(Simulation):
             autodump = (autodump, None)
         config.autodump = autodump
 
-        if autodiff is None:
-            autodiff = simulation_def.get('autodiff')
+        autodiff = simulation_def.get('autodiff', None)
         if autodiff is True:
             autodiff = 'autodump.h5'
         if isinstance(autodiff, basestring):
@@ -314,6 +295,25 @@ class TilSimulation(Simulation):
 
         output_path = os.path.join(output_directory, output_file)
 
+        if input_def is not None:
+            method = input_def.get('method', 'h5')
+        else:
+            method = 'h5'
+
+        # need to be before processes because in case of legislation, we need input_table for now.
+        if method == 'h5':
+            if input_file is None:
+                assert input_def is not None
+                input_file = input_def['file']
+            assert input_file is not None
+            input_path = os.path.join(input_directory, input_file)
+            data_source = H5Data(input_path, output_path)
+        elif method == 'void':
+            input_path = None
+            data_source = Void(output_path)
+        else:
+            print(method, type(method))
+
         entities = {}
         for k, v in content['entities'].iteritems():
             entities[k] = Entity.from_yaml(k, v)
@@ -332,25 +332,26 @@ class TilSimulation(Simulation):
             entity.compute_lagged_fields()
             # entity.optimize_processes()
 
-        if 'init' not in simulation_def and 'processes' not in simulation_def:
-            raise SyntaxError("the 'simulation' section must have at least one "
-                              "of 'processes' or 'init' subsection")
         # for entity in entities.itervalues():
         #     entity.resolve_method_calls()
         used_entities = set()
-        init_def = [d.items()[0] for d in simulation_def.get('init', [])]
+        init_def = [d.items()[0] for d in simulation_def.get('init', {})]
         init_processes = []
         for ent_name, proc_names in init_def:
-            if ent_name not in entities:
-                raise Exception("Entity '%s' not found" % ent_name)
+            if ent_name != 'legislation':
+                if ent_name not in entities:
+                    raise Exception("Entity '%s' not found" % ent_name)
 
-            entity = entities[ent_name]
-            used_entities.add(ent_name)
-            init_processes.extend([(entity.processes[proc_name], 1)
-                                   for proc_name in proc_names])
+                entity = entities[ent_name]
+                used_entities.add(ent_name)
+                init_processes.extend([(entity.processes[proc_name], 1, 1)
+                                       for proc_name in proc_names])
+            else:
+                boum1
+                proc = ExtProcess('of_on_liam', ['simulation', 2009, 'period'])
+                init_processes.append((proc, 1, 1))
 
-        processes_def = [d.items()[0]
-                         for d in simulation_def.get('processes', [])]
+        processes_def = [d.items()[0] for d in simulation_def['processes']]
         processes = []
         for ent_name, proc_defs in processes_def:
             if ent_name != 'legislation':
@@ -360,10 +361,18 @@ class TilSimulation(Simulation):
                     # proc_def is simply a process name
                     if isinstance(proc_def, basestring):
                         # use the default periodicity of 1
-                        proc_name, periodicity = proc_def, 1
+                        proc_name, periodicity, start = proc_def, 1, 1
                     else:
-                        proc_name, periodicity = proc_def
-                    processes.append((entity.processes[proc_name], periodicity))
+                        if len(proc_def) == 3:
+                            proc_name, periodicity, start = proc_def
+                        elif len(proc_def) == 2:
+                            proc_name, periodicity = proc_def
+                            start = 1
+                    processes.append((entity.processes[proc_name], periodicity, start))
+            else:
+                pass
+                # proc = ExtProcess('of_on_liam', ['simulation', proc_defs[0], 'period'])
+                # processes.append((proc, 'year', 12))
 
         entities_list = sorted(entities.values(), key=lambda e: e.name)
         declared_entities = set(e.name for e in entities_list)
@@ -373,51 +382,32 @@ class TilSimulation(Simulation):
             print("WARNING: entit%s without any executed process:" % suffix,
                   ','.join(sorted(unused_entities)))
 
-        if input_def is not None:
-            input_method = input_def.get('method', 'h5')
+        if method == 'h5':
+            if input_file is None:
+                input_file = input_def['file']
+            input_path = os.path.join(input_directory, input_file)
+            data_source = H5Data(input_path, output_path)
+        elif method == 'void':
+            data_source = Void(output_path)
         else:
-            input_method = 'h5'
-
-        input_path = os.path.join(input_directory, input_file)
+            raise ValueError("'%s' is an invalid value for 'method'. It should "
+                             "be either 'h5' or 'void'")
 
         default_entity = simulation_def.get('default_entity')
-
-        if runs is None:
-            runs = simulation_def.get('runs', 1)
+        # processes[2][0].subprocesses[0][0]
         return TilSimulation(
-            globals_def,
-            periods,
-            start_period,
+            globals_def, periods,
+            init_period,
             init_processes,
             processes,
             entities_list,
-            input_method,
-            input_path,
-            output_path,
+            data_source,
             default_entity,
-            runs = runs,
-            legislation = legislation,
-            final_stat = final_stat,
-            time_scale = time_scale,
-            retro = retro,
+            legislation,
+            final_stat,
+            time_scale,
+            retro
             )
-
-    @classmethod
-    def from_yaml(cls, fpath,
-                  input_dir=None, input_file=None,
-                  output_dir=None, output_file=None,
-                  start_period=None, periods=None, seed=None,
-                  skip_shows=None, skip_timings=None, log_level=None,
-                  assertions=None, autodump=None, autodiff=None,
-                  runs=None):
-        with open(fpath) as f:
-            return cls.from_str(f, os.path.dirname(os.path.abspath(fpath)),
-                                input_dir, input_file,
-                                output_dir, output_file,
-                                start_period, periods, seed,
-                                skip_shows, skip_timings, log_level,
-                                assertions, autodump, autodiff,
-                                runs)
 
     def load(self):
         return timed(self.data_source.load, self.globals_def, self.entities_map)
@@ -426,30 +416,12 @@ class TilSimulation(Simulation):
     def entities_map(self):
         return {entity.name: entity for entity in self.entities}
 
-    def run_single(self, run_console=False, run_num=None):
+    def run(self, run_console=False):
         start_time = time.time()
-
-        input_dataset = timed(self.data_source.load,
-                              self.globals_def,
-                              self.entities_map)
-
-        globals_data = input_dataset.get('globals')
-        self.data_sink.close()
-        timed(self.data_sink.prepare, self.globals_def, self.entities_map,
-              input_dataset, self.start_period - 1)
-
-        print(" * building arrays for first simulated period")
-        for ent_name, entity in self.entities_map.iteritems():
-            print("    -", ent_name, "...", end=' ')
-            # TODO: this whole process of merging all periods is very
-            # opinionated and does not allow individuals to die/disappear
-            # before the simulation starts. We couldn't for example,
-            # take the output of one of our simulation and
-            # re-simulate only some years in the middle, because the dead
-            # would be brought back to life. In conclusion, it should be
-            # optional.
-            timed(entity.build_period_array, self.start_period - 1)
-        print("done.")
+        h5in, h5out, globals_data = timed(self.data_source.run,
+                                          self.globals_def,
+                                          self.entities_map,
+                                          self.start_period)
 
         if config.autodump or config.autodiff:
             if config.autodump:
@@ -464,11 +436,20 @@ class TilSimulation(Simulation):
         else:
             h5_autodump = None
 
+#        input_dataset = self.data_source.run(self.globals_def,
+#                                             entity_registry)
+#        output_dataset = self.data_sink.prepare(self.globals_def,
+#                                                entity_registry)
+#        output_dataset.copy(input_dataset, self.init_period - 1)
+#        for entity in input_dataset:
+#            indexed_array = buildArrayForPeriod(entity)
+
         # tell numpy we do not want warnings for x/0 and 0/0
         np.seterr(divide='ignore', invalid='ignore')
 
         process_time = defaultdict(float)
         period_objects = {}
+
         eval_ctx = EvaluationContext(self, self.entities_map, globals_data)
         eval_ctx.periodicity = time_period[self.time_scale] * (1 - 2 * (self.retro))
         eval_ctx.format_date = self.time_scale
@@ -486,17 +467,22 @@ class TilSimulation(Simulation):
             eval_ctx.periods = periods
             eval_ctx.period_idx = period_idx + 1
             print(eval_ctx.period_idx)
+#            # build context for this period:
+#            const_dict = {'period_idx': period_idx + 1,
+#                          'longitudinal': self.longitudinal,
+#                          'pension': None,
+#            assert(periods[period_idx + 1] == period)
 
-            if config.log_level in ("functions", "processes"):
+            if config.log_level in ("procedures", "processes"):
                 print()
             print("period", period,
                   end=" " if config.log_level == "periods" else "\n")
-            if init and config.log_level in ("functions", "processes"):
+            if init and config.log_level in ("procedures", "processes"):
                 for entity in entities:
                     print("  * %s: %d individuals" % (entity.name,
                                                       len(entity.array)))
             else:
-                if config.log_level in ("functions", "processes"):
+                if config.log_level in ("procedures", "processes"):
                     print("- loading input data")
                     for entity in entities:
                         print("  *", entity.name, "...", end=' ')
@@ -510,55 +496,55 @@ class TilSimulation(Simulation):
                 entity.array['period'] = period
 
             # Longitudinal
-#            person_name = 'individus'
-#            person = [x for x in entities if x.name == person_name][0]
-#            var_id = person.array.columns['id']
-#            # Init
-#            use_longitudinal_after_init = any(
-#                varname in self.longitudinal for varname in ['salaire_imposable', 'workstate']
-#                )
-#            if init:
-#                for varname in ['salaire_imposable', 'workstate']:
-#                    self.longitudinal[varname] = None
-#                    var = person.array.columns[varname]
-#                    fpath = self.data_source.input_path
-#                    input_file = HDFStore(fpath, mode="r")
-#                    if 'longitudinal' in input_file.root:
-#                        input_longitudinal = input_file.root.longitudinal
-#                        if varname in input_longitudinal:
-#                            self.longitudinal[varname] = input_file['/longitudinal/' + varname]
-#                            if period not in self.longitudinal[varname].columns:
-#                                table = DataFrame({'id': var_id, period: var})
-#                                self.longitudinal[varname] = self.longitudinal[varname].merge(
-#                                    table, on='id', how='outer')
-#                    if self.longitudinal[varname] is None:
-#                        self.longitudinal[varname] = DataFrame({'id': var_id, period: var})
-#
-#            # maybe we have a get_entity or anything nicer than that # TODO: check
-#            elif use_longitudinal_after_init:
-#                for varname in ['salaire_imposable', 'workstate']:
-#                    var = person.array.columns[varname]
-#                    table = DataFrame({'id': var_id, period: var})
-#                    if period in self.longitudinal[varname]:
-#                        import pdb
-#                        pdb.set_trace()
-#                    self.longitudinal[varname] = self.longitudinal[varname].merge(table, on='id', how='outer')
-#
-#            eval_ctx.longitudinal = self.longitudinal
+            person_name = 'individus'
+            person = [x for x in entities if x.name == person_name][0]
+            var_id = person.array.columns['id']
+            # Init
+            use_longitudinal_after_init = any(
+                varname in self.longitudinal for varname in ['salaire_imposable', 'workstate']
+                )
+            if init:
+                for varname in ['salaire_imposable', 'workstate']:
+                    self.longitudinal[varname] = None
+                    var = person.array.columns[varname]
+                    fpath = self.data_source.input_path
+                    input_file = HDFStore(fpath, mode="r")
+                    if 'longitudinal' in input_file.root:
+                        input_longitudinal = input_file.root.longitudinal
+                        if varname in input_longitudinal:
+                            self.longitudinal[varname] = input_file['/longitudinal/' + varname]
+                            if period not in self.longitudinal[varname].columns:
+                                table = DataFrame({'id': var_id, period: var})
+                                self.longitudinal[varname] = self.longitudinal[varname].merge(
+                                    table, on='id', how='outer')
+                    if self.longitudinal[varname] is None:
+                        self.longitudinal[varname] = DataFrame({'id': var_id, period: var})
+
+            # maybe we have a get_entity or anything nicer than that # TODO: check
+            elif use_longitudinal_after_init:
+                for varname in ['salaire_imposable', 'workstate']:
+                    var = person.array.columns[varname]
+                    table = DataFrame({'id': var_id, period: var})
+                    if period in self.longitudinal[varname]:
+                        import pdb
+                        pdb.set_trace()
+                    self.longitudinal[varname] = self.longitudinal[varname].merge(table, on='id', how='outer')
+
+            eval_ctx.longitudinal = self.longitudinal
 
             if processes:
                 num_processes = len(processes)
                 for p_num, process_def in enumerate(processes, start=1):
-                    process, periodicity = process_def
+                    process, periodicity, start = process_def
 
                     # set current entity
-                    eval_ctx.entity_name = process.entity.name
+                    if process.entity:
+                        eval_ctx.entity_name = process.entity.name
 
-                    if config.log_level in ("functions", "processes"):
+                    if config.log_level in ("procedures", "processes"):
                         print("- %d/%d" % (p_num, num_processes), process.name,
                               end=' ')
                         print("...", end=' ')
-
                     # TDOD: change that
                     print('periodicity: {}'.format(periodicity))
                     if isinstance(periodicity, int):
@@ -566,7 +552,7 @@ class TilSimulation(Simulation):
                             elapsed, _ = gettime(process.run_guarded, eval_ctx)
                         else:
                             elapsed = 0
-                            if config.log_level in ("functions", "processes"):
+                            if config.log_level in ("procedures", "processes"):
                                 print("skipped (periodicity)")
                     else:
                         assert periodicity in time_period
@@ -585,18 +571,18 @@ class TilSimulation(Simulation):
 
                         else:
                             elapsed = 0
-                            if config.log_level in ("function", "processes"):
+                            if config.log_level in ("procedures", "processes"):
                                 print("skipped (periodicity)")
 
                     process_time[process.name] += elapsed
-                    if config.log_level in ("functions", "processes"):
+                    if config.log_level in ("procedures", "processes"):
                         if config.show_timings:
                             print("done (%s elapsed)." % time2str(elapsed))
                         else:
                             print("done.")
                     self.start_console(eval_ctx)
 
-            if config.log_level in ("functions", "processes"):
+            if config.log_level in ("procedures", "processes"):
                 print("- storing period data")
                 for entity in entities:
                     print("  *", entity.name, "...", end=' ')
@@ -614,7 +600,7 @@ class TilSimulation(Simulation):
             period_objects[period] = sum(len(entity.array)
                                          for entity in entities)
             period_elapsed_time = time.time() - period_start_time
-            if config.log_level in ("functions", "processes"):
+            if config.log_level in ("procedures", "processes"):
                 print("period %d" % period, end=' ')
             print("done", end=' ')
             if config.show_timings:
@@ -657,56 +643,176 @@ class TilSimulation(Simulation):
             print(periods[0])
             simulate_period(0, self.start_period, [None, periods[0]], self.init_processes,
                             self.entities, init=True)
+            time_init = time.time() - init_start_time
+
             main_start_time = time.time()
-            periods = range(self.start_period,
-                            self.start_period + self.periods)
-            for period_idx, period in enumerate(periods):
-                simulate_period(period_idx, period,
+            for period_idx, period in enumerate(periods[1:]):
+                period_start_time = time.time()
+                simulate_period(period_idx, period, periods,
                                 self.processes, self.entities)
 
+#                 if self.legislation:
+#                     if not self.legislation['ex_post']:
+#
+#                         elapsed, _ = gettime(liam2of.main,period)
+#                         process_time['liam2of'] += elapsed
+#                         elapsed, _ = gettime(of_on_liam.main,self.legislation['annee'],[period])
+#                         process_time['legislation'] += elapsed
+#                         elapsed, _ = gettime(merge_leg.merge_h5,self.data_source.output_path,
+#                                              "C:/Til/output/"+"simul_leg.h5",period)
+#                         process_time['merge_leg'] += elapsed
+
+                time_elapsed = time.time() - period_start_time
+                print("period %d done" % period, end=' ')
+                if config.show_timings:
+                    print("(%s elapsed)." % time2str(time_elapsed))
+                else:
+                    print()
+
             total_objects = sum(period_objects[period] for period in periods)
-            avg_objects = str(total_objects // self.periods) \
-                if self.periods else 'N/A'
-            main_elapsed_time = time.time() - main_start_time
-            ind_per_sec = str(int(total_objects / main_elapsed_time)) \
-                if main_elapsed_time else 'inf'
+            total_time = time.time() - main_start_time
+
+#             if self.legislation:
+#                 if self.legislation['ex_post']:
+#
+#                     elapsed, _ = gettime(liam2of.main)
+#                     process_time['liam2of'] += elapsed
+#                     elapsed, _ = gettime(of_on_liam.main,self.legislation['annee'])
+#                     process_time['legislation'] += elapsed
+#                     # TODO: faire un programme a part, so far ca ne marche pas pour l'ensemble
+#                     # adapter n'est pas si facile, comme on veut economiser une table,
+#                     # on ne peut pas faire de append directement parce qu on met 2010 apres 2011
+#                     # a un moment dans le calcul
+#                     elapsed, _ = gettime(merge_leg.merge_h5,self.data_source.output_path,
+#                                          "C:/Til/output/"+"simul_leg.h5",None)
+#                     process_time['merge_leg'] += elapsed
+
+            if self.final_stat:
+                elapsed, _ = gettime(start, period)
+                process_time['Stat'] += elapsed
+
+            total_time = time.time() - main_start_time
+            time_year = 0
+            if len(periods) > 1:
+                nb_year_approx = periods[-1] / 100 - periods[1] / 100
+                if nb_year_approx > 0:
+                    time_year = total_time / nb_year_approx
+
+            try:
+                ind_per_sec = str(int(total_objects / total_time))
+            except ZeroDivisionError:
+                ind_per_sec = 'inf'
 
             print("""
 ==========================================
  simulation done
 ==========================================
  * %s elapsed
- * %s individuals on average
+ * %d individuals on average
  * %s individuals/s/period on average
+
+ * %s second for init_process
+ * %s time/period in average
+ * %s time/year in average
 ==========================================
-""" % (time2str(time.time() - start_time), avg_objects, ind_per_sec))
+""" % (
+                time2str(time.time() - start_time),
+                total_objects / self.periods,
+                ind_per_sec,
+                time2str(time_init),
+                time2str(total_time / self.periods),
+                time2str(time_year))
+            )
 
             show_top_processes(process_time, 10)
 #            if config.debug:
 #                show_top_expr()
 
             if run_console:
-                ent_name = self.default_entity
-                if ent_name is None and len(eval_ctx.entities) == 1:
-                    ent_name = eval_ctx.entities.keys()[0]
-                # FIXME: fresh_data prevents the old (cloned) EvaluationContext
-                # to be referenced from each EntityContext, which lead to period
-                # being fixed to the last period of the simulation. This should
-                # be fixed in EvaluationContext.copy but the proper fix breaks
-                # stuff (see the comments there)
-                console_ctx = eval_ctx.clone(fresh_data=True,
-                                             entity_name=ent_name)
+                console_ctx = eval_ctx.clone(entity_name=self.default_entity)
                 c = console.Console(console_ctx)
                 c.run()
 
         finally:
-            self.close()
+            if h5in is not None:
+                h5in.close()
+            h5out.close()
             if h5_autodump is not None:
                 h5_autodump.close()
 
-    def run(self, run_console=False):
-        for i in range(int(self.runs)):
-            self.run_single(run_console, i)
+    def close_output_sore(self):
+        if self.output_store is not None:
+            self.output_store.close()
+
+    def get_output_store(self):
+        if self.output_store is None:
+            return HDFStore(self.data_source.output_path)
+        elif not self.output_store.is_open:
+            self.output_store.open()
+
+        return self.output_store
+
+    def get_variable(self, variables_name, fillna_value = None, function = None):
+        assert self.uniform_weight is not None
+        threshold = self.uniform_weight  # TODO
+        assert isinstance(variables_name, list)
+        output_store = self.get_output_store()
+        entities = self.entities_map.keys()
+        variable_by_name = dict(
+            (variable.name, variable)
+            for entity in entities
+            for variable in self.entities_map[entity].variables.values()
+            if hasattr(variable, 'name') and entity != 'register'
+            )
+        available_variables_name = variable_by_name.keys()
+        assert len(available_variables_name) == len(set(available_variables_name))
+
+        holding_entities = set([variable_by_name[variable_name].entity.name for variable_name in variables_name])
+        print(holding_entities)
+        assert len(holding_entities) == 1, 'Variables are dispatched on more {} entities {}: \n {}'.format(
+            len(holding_entities),
+            set(variable_by_name[variable_name].entity.name for variable_name in variables_name),
+            dict(
+                (variable_name, variable_by_name[variable_name].entity.name)
+                for variable_name in variables_name
+                )
+            )
+
+        entity = variable_by_name[variables_name[0]].entity
+        entity.index_for_person_variable_name = self.index_for_person_variable_name_by_entity_name[entity.name]
+
+        for variable_name in variables_name:
+            assert variable_name in output_store['entities/{}'.format(entity)].columns
+
+        columns = variables_name + ['id', 'period']
+        if self.weight_column_name_by_entity_name.get(entity.name):
+            columns.append(self.weight_column_name_by_entity_name.get(entity.name))
+        df = output_store['entities/{}'.format(entity)][columns]
+        df.period = df.period // 100
+        panel = df.set_index(['id', 'period']).to_panel()
+
+        weight_column_name = self.weight_column_name_by_entity_name.get(entity.name)
+        if weight_column_name:
+            panel[weight_column_name] = (panel[weight_column_name] != -1) * threshold
+        else:
+            weight_column_name = 'weights'
+            panel[weight_column_name] = threshold
+
+        if len(variables_name) == 1:
+            variable_name = variables_name[0]
+            if fillna_value:
+                panel[variable_name].fillna(value = fillna_value, inplace = True)
+
+            if function == 'count':
+                return weighted_count(panel, variable_name, weights = weight_column_name)
+            elif function == 'mean':
+                return weighted_mean(panel, variable_name, weights = weight_column_name)
+            elif function == 'sum':
+                return weighted_sum(panel, variable_name, weights = weight_column_name)
+            else:
+                return panel
+        else:
+            return panel
 
     def start_console(self, context):
         if self.stepbystep:
@@ -714,6 +820,35 @@ class TilSimulation(Simulation):
             res = c.run(debugger=True)
             self.stepbystep = res == "step"
 
-    def close(self):
-        self.data_source.close()
-        self.data_sink.close()
+
+def weighted_count(panel, variable, weights = None, group_by = None):
+    weighted_count_func = lambda x, w: (x.notnull() * w).sum()
+    return weighted_func(panel, variable, weighted_func = weighted_count_func, weights = weights, group_by = group_by)
+
+
+def weighted_func(panel, variable, weighted_func = None, weights = None, group_by = None):
+    if group_by is not None:
+        NotImplementedError
+    assert isinstance(variable, str)
+
+    if isinstance(weights, str):
+        assert weights in panel
+        weight_name = weights
+        weights = panel[weight_name]
+        return weighted_func(panel[variable], weights)
+
+    else:
+        NotImplementedError  # TODO uniform weights
+        weighted_func_partial = functools.partial(weighted_func, weights)
+        lambda x: (x * weights).sum() / weights.sum()
+        return panel[variable].apply(weighted_func_partial)
+
+
+def weighted_mean(panel, variable, weights = None, group_by = None):
+    weighted_mean_func = lambda x, w: (x * w).sum() / w.sum()
+    return weighted_func(panel, variable, weighted_func = weighted_mean_func, weights = weights, group_by = group_by)
+
+
+def weighted_sum(panel, variable, weights = None, group_by = None):
+    weighted_sum_func = lambda x, w: (x * w).sum()
+    return weighted_func(panel, variable, weighted_func = weighted_sum_func, weights = weights, group_by = group_by)
