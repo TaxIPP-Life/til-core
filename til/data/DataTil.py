@@ -36,6 +36,7 @@ variables_til = {
             'civilstate',
             'findet',
             'data_origin',
+            'dependance_level',
             'idfoy',
             'idmen',
             'mere',
@@ -71,6 +72,7 @@ variables_til = {
             'anc',
             'civilstate',
             'data_origin',
+            'dependance_level',
             'deces'
             'findet',
             'idfoy',
@@ -477,6 +479,7 @@ class DataTil(object):
                     vars_int, vars_float = variables_til[name]
                     for var in vars_int + ['id', 'period']:
                         if var not in table.columns:
+                            log.info('Missing variable {}'.format(var))
                             table[var] = -1
                         table.fillna(-1, inplace = True)
                         table[var] = table[var].astype(np.int32)
@@ -520,19 +523,14 @@ class DataTil(object):
         diff_age_pere = (tab['age_en_mois_pere'] - tab['age_en_mois'])
         diff_age_mere = (tab['age_en_mois_mere'] - tab['age_en_mois'])
 
-        try:
-            assert diff_age_pere.min() > 12 * 14
-            assert diff_age_mere.min() > 12 * 12.4
-            # pas de probleme du conjoint
-            assert sum(tab['id_pere'] == tab['id_partner']) == 0
-            assert sum(tab['id_mere'] == tab['id_partner']) == 0
-            assert sum(tab['id_mere'] == tab['id_pere']) == 0
-            assert sum(tab['sexe_mere'] == tab['sexe_pere']) == 0
-        except:
-            pdb.set_trace()
+        assert diff_age_pere.min() > 12 * 14
+        assert diff_age_mere.min() > 12 * 12.4
+        # pas de probleme du conjoint
+        assert sum(tab['id_pere'] == tab['id_partner']) == 0
+        assert sum(tab['id_mere'] == tab['id_partner']) == 0
+        assert sum(tab['id_mere'] == tab['id_pere']) == 0
+        assert sum(tab['sexe_mere'] == tab['sexe_pere']) == 0
 
-            test = diff_age_pere < 0
-            tab[test]
         # on va plus loin sur les conjoints pour éviter les frères et soeurs:
         tab_partner = tab.loc[tab['partner'] > -1].copy()
         tab_partner.replace(-1, np.nan, inplace=True)
@@ -634,6 +632,9 @@ class DataTil(object):
             rec.loc[rec['civilstate'].isin([1, 5]), 'civilstate'] ==
             rec.loc[rec['civilstate'].isin([1, 5]), 'civilstate_c']
             )
+        assert individus.data_origin.notnull().all()
+        assert (individus.data_origin == 1).any()
+        assert individus.data_origin.isin(range(2)).all()
         self._check_links(individus)
 
     def _output_name(self, extension='.h5'):
@@ -661,19 +662,15 @@ class DataTil(object):
                 else self.entity_by_name.get(entity_name)
             if entity is not None:
                 entity = entity.fillna(-1)
-                try:
-                    ent_table = entity.to_records(index=False)
-                except:
-                    pdb.set_trace()
+                entity.sort_index(axis = 1, inplace = True)
+                ent_table = entity.to_records(index=False)
                 dtypes = ent_table.dtype
                 final_name = of_name_to_til[entity_name]
-                try:
-                    table = h5file.createTable(entity_node, final_name, dtypes, title="%s table" % final_name)
-                    table.append(ent_table)
-                except:
-                    pdb.set_trace()
+                table = h5file.createTable(entity_node, final_name, dtypes, title="%s table" % final_name)
+                table.append(ent_table)
                 table.flush()
-
+                # Additional tables
+                # Create companies
                 if entity_name == 'menages':
                     entity = entity.loc[entity['id'] > -1]
                     ent_table2 = entity[['pond', 'id', 'period']].to_records(index=False)
@@ -683,8 +680,11 @@ class DataTil(object):
                     table.flush()
                 if entity_name == 'individus':
                     # Create register
-                    ent_table2 = entity[['age_en_mois', 'sexe', 'pere', 'mere', 'id', 'findet', 'period']].to_records(
-                        index = False)
+                    ent_table2 = entity[
+                        [
+                            'age_en_mois', 'data_origin', 'findet', 'id', 'mere', 'pere', 'period', 'sexe']
+                        ].to_records(
+                            index = False)
                     dtypes2 = ent_table2.dtype
                     table = h5file.createTable(entity_node, 'register', dtypes2, title="register table")
                     table.append(ent_table2)

@@ -13,6 +13,7 @@ import patsy
 import pkg_resources
 import statsmodels.api as sm
 
+from til_base_model.config import Config
 
 from openfisca_survey_manager.survey_collections import SurveyCollection
 
@@ -57,7 +58,8 @@ def load_dataframe():
     # CDATDC: Année de décès du conjoint
     famille_variables = ['ident_ind', 'cdatco', 'cdatdc', 'cdatse', 'couple']
     # CDATSE: Année de la séparation effective
-    individus_variables = ['age', 'ident_ind', 'poids_hsi', 'sexe', 'etamatri']
+    individus_variables = ['age', 'anais', 'etamatri', 'ident_ind', 'ident_instit', 'mnais', 'poids_hsi', 'sexe']
+    institutions_variables = ['ident_instit', 'nvtypet']
     revenus_alloc_reconn_variables = ['ident_ind', 'rgir']
     # AGFINETU: Age de fin d'études initiales
     # DIP14: Diplôme le plus élevé (code regroupé)
@@ -65,6 +67,7 @@ def load_dataframe():
 
     famille = survey.get_values(table = 'g_famille', variables = famille_variables)
     individus = survey.get_values(table = 'individus', variables = individus_variables)
+    institutions = survey.get_values(table = 'info_instit', variables = institutions_variables)
     revenus_alloc_reconn = survey.get_values(
         table = 'l_revenus_alloc_reconn', variables = revenus_alloc_reconn_variables)
     scolarite = survey.get_values(table = 'j_scolarite', variables = scolarite_variables)
@@ -75,7 +78,10 @@ def load_dataframe():
     for dataframe in dataframes:
         result = result.merge(dataframe, on = 'ident_ind')
 
+    result = result.merge(institutions, on = 'ident_instit')
+
     list_variables_with_missing_values(result)
+
     return result
 
 
@@ -125,15 +131,14 @@ def impute_value(dataframe, endogeneous_variable, exogeneous_variables):
     return imputed_dataframe
 
 
-def renaming(dataframe):
-    result = dataframe
+def rename_variables(dataframe):
+    result = dataframe.copy()
     result.sexe = result.sexe - 1
 
     new_by_old_name = dict(
         agfinetu = 'findet',
         etamatri = 'civilstate',
-    #    cdatco = 'dur_in_couple',
-    #    cdatse = 'dur_out_couple'
+        poids_hsi = 'pond',
         )
 
     result['education_level'] = 9
@@ -145,40 +150,76 @@ def renaming(dataframe):
     result.loc[result.dip14 // 10 == 2, 'education_level'] = 5
     result.loc[result.dip14 // 10 == 1, 'education_level'] = 6
 
+    # Ceux qui ne connaissent pas leur eta matrimonial sont considérés célibataires
+    result.loc[result.etamatri == 9, 'etamatri'] = 1
+
     result.rename(columns = new_by_old_name, inplace = True)
 
     # TODO traiter ceux pour qui cdatse, cdatco = 9999 qui ne savent pas
     # Pour l'instant on met à -1
-    result.loc[result.cdatco == 9999, 'cdatco'] = -1
-    result.dur_in_couple == 2009 - result.cdatco
+
+    result['dur_in_couple'] = 2009 - result['cdatco']
     result.loc[result.dur_in_couple.isnull(), 'dur_in_couple'] = -1
 
-    result.loc[result.dur_in_couple < 0, 'dur_in_couple'] = -1
-
+    result['dur_out_couple'] = 2009 - result.cdatse
     result.loc[result.dur_out_couple.isnull(), 'dur_out_couple'] = -1
-    result.dur_out_couple = 2009 - result.dur_out_couple
-
-    result.loc[result.dur_out_couple < 0, 'dur_out_couple'] = -1
 
     assert (result.sexe.isin([0, 1])).all()
     assert (result.education_level.isin(range(1, 7) + [9])).all()
-    assert (result.civilstate.isin(range(0, 5) + [9])).all()
-    assert (result.dur_in_couple >= -1).all()
-    assert (result.dur_out_couple >= -1).all()
+    assert (result.civilstate.isin(range(0, 5))).all()
+    # assert (result.dur_in_couple >= -1).all()
+    # assert (result.dur_out_couple >= -1).all()
     return result
 
-if __name__ == "__main__":
-    dataframe = load_dataframe()
 
+def expand_data(dataframe, threshold):
+    low_weight_dataframe = dataframe.query('pond < @threshold')
+    weights_of_random_picks = low_weight_dataframe.pond.sum()
+    number_of_picks = weights_of_random_picks // threshold
+    log.info('Extracting {} from {} observations with weights lower than {} representing {} individuals'.format(
+        number_of_picks,
+        low_weight_dataframe.pond.count(),
+        threshold,
+        weights_of_random_picks
+        ))
+    sample = low_weight_dataframe.sample(n = number_of_picks, weights = 'pond', random_state = 12345)
+    sample.pond = 200
+    return dataframe.query('pond >= @threshold').append(sample)
+
+
+def save(dataframe):
+    config = Config()
+    hsi_data_directory = config.get('raw_data', 'hsi_data_directory')
+    dataframe.to_hdf(os.path.join(hsi_data_directory, "hsi_extract.h5"), 'individus_institutions')
+
+
+if __name__ == "__main__":
+    log.setLevel(logging.INFO)
+
+    initial_dataframe = load_dataframe()
     exogeneous_variables = ['age', 'sexe']
-    imputed_dataframe  = dataframe.copy()
-    for endogeneous_variable in ['cdatco', 'cdatse', 'agfinetu']:
+    imputed_dataframe = initial_dataframe.copy()
+    for endogeneous_variable in ['cdatco', 'cdatse', 'agfinetu', 'rgir']:
         print '_____ {} ____'.format(endogeneous_variable)
         compute_nans_and_missing_values(imputed_dataframe, endogeneous_variable)
         print '==='
         imputed_dataframe = impute_value(imputed_dataframe, endogeneous_variable, exogeneous_variables)
         nans, missing_values, missing = compute_nans_and_missing_values(imputed_dataframe, endogeneous_variable)
         print missing_values
+
+    dataframe = rename_variables(imputed_dataframe)
+    dataframe = dataframe.dropna(subset = ['age']).query('age >= 60').copy()
+    assert ((dataframe.anais >= 1900) & (dataframe.anais <= 2009)).all()
+    assert dataframe.age.notnull().all()
+
+    numpy.random.seed(12345)
+    threshold = 200
+    final_dataframe = expand_data(dataframe, threshold)
+    final_dataframe.loc[final_dataframe.rgir <= 0, 'rgir'] = 0
+    final_dataframe.loc[final_dataframe.rgir >= 6, 'rgir'] = 6
+
+
+    save(final_dataframe)
 
 
 

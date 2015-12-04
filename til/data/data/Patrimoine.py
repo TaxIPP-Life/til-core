@@ -14,13 +14,12 @@ import sys
 
 import logging
 import numpy as np
-from pandas import concat, DataFrame, merge, read_csv, Series
+from pandas import concat, DataFrame, merge, read_csv, read_hdf, Series
 
-
+from openfisca_core.calmar import calmar
 from til_base_model.targets.population import get_data_frame_insee
 
-# 1- Importation des classes/librairies/tables nécessaires à l'importation des
-# données de l'enquête Patrimoine
+# Importation des classes/librairies/tables nécessaires à l'importation des données de l'enquête Patrimoine
 from til_base_model.config import Config
 
 from til.data.DataTil import DataTil
@@ -86,6 +85,8 @@ class Patrimoine(DataTil):
         individus = read_csv(path_ind)
         path_men = os.path.join(patrimoine_data_directory, 'menage.csv')
         menages = read_csv(path_men)
+        individus_institutions_path = config.get('raw_data', 'hsi_data_directory')
+        individus_institutions = read_hdf(os.path.join(individus_institutions_path, 'hsi_extract.h5'))
 
         individus['identmen'] = individus['identmen'].apply(int)
         menages['identmen'] = menages['identmen'].apply(int)
@@ -97,8 +98,10 @@ class Patrimoine(DataTil):
             u"Nombre d'individus dans l'enquête initiale : " +
             str(len(individus['identind'].drop_duplicates()))
             )
+
         self.entity_by_name['menages'] = menages
         self.entity_by_name['individus'] = individus
+        self.entity_by_name['individus_institutions'] = individus_institutions
 
         assert (menages['identmen'].isin(individus['identmen'])).all()
         assert (individus['identmen'].isin(menages['identmen'])).all()
@@ -117,14 +120,16 @@ class Patrimoine(DataTil):
             antilles = menages.loc[menages['zeat'] == 0, 'id']
             menages = menages[~menages['id'].isin(antilles)]
             individus = individus[~individus['idmen'].isin(antilles)]
+
         self.entity_by_name['individus'] = individus
         self.entity_by_name['menages'] = menages
 
     def to_DataTil_format(self):
         individus = self.entity_by_name['individus']
         menages = self.entity_by_name['menages']
+        individus_institutions = self.entity_by_name['individus_institutions']
 
-        til_name_by_patrimoine = {
+        til_name_by_patrimoine_name = {
             'zsalaires_i': 'salaire_imposable',
             'zchomage_i': 'choi',
             'zpenalir_i': 'alr',
@@ -134,7 +139,7 @@ class Patrimoine(DataTil):
             'cyder': 'anc',
             'duree': 'xpr',
             }
-        individus.rename(columns=til_name_by_patrimoine, inplace=True)
+        individus.rename(columns=til_name_by_patrimoine_name, inplace=True)
         # id, men
         menages.index = range(10, len(menages) + 10)
         menages['id'] = menages.index
@@ -177,12 +182,45 @@ class Patrimoine(DataTil):
         # findet
         individus['findet'].replace(0, np.nan, inplace=True)
         individus['findet'] = individus['findet'] - individus['anais']
-
         # tauxprime
         individus['tauxprime'] = 0
+        # dependance_level
+        individus['dependance_level'] = -1
+
+        # Individus en institutions
+        individus_institutions['id'] = range(
+            individus.id.max() + 1, individus.id.max() + 1 + len(individus_institutions))
+        individus_institutions['idmen'] = range(
+            individus.idmen.max() + 1, individus.idmen.max() + 1 + len(individus_institutions))
+
+        individus['data_origin'] = 0
+        individus_institutions['data_origin'] = 1
+        age = self.survey_date / 100 - individus_institutions['anais']
+        individus_institutions['age_en_mois'] = 12 * age + 11 - individus_institutions['mnais'].values
+        individus_institutions['lienpref'] = 0
+        individus_institutions['workstate'] = 1  # inactif
+        individus_institutions['period'] = self.survey_date
+        individus_institutions['civilstate'] = 2  # on les forces à célibataires TODO leur attirbuer un partner
+        individus_institutions['dependance_level'] = (
+            2 * individus_institutions['rgir'].isin([1, 2]) + 1 * individus_institutions['rgir'].isin([3, 4])
+            ) + 0
+        log.info(u'Ajout de {} individus en institution aux {} individus initiaux'.format(
+            len(individus_institutions), len(individus)))
+        individus = individus.append(individus_institutions, verify_integrity = True, ignore_index = True)
+        log.info(u'La table individus contient désormais {} individus'.format(len(individus)))
+
+        individus_institutions_menages = individus_institutions[['idmen', 'pond']].copy()
+        individus_institutions_menages.rename(columns = {'idmen': 'id'}, inplace = True)
+        individus_institutions_menages['period'] = self.survey_date
+        log.info(u'Ajout de {} menages en institution aux {} ménages initiaux'.format(
+            len(individus_institutions_menages), len(menages)))
+        menages = menages.append(individus_institutions_menages, verify_integrity = True, ignore_index = True)
+        log.info(u'La table menages contient désormais {} ménages'.format(len(menages)))
 
         self.entity_by_name['individus'] = individus
         self.entity_by_name['menages'] = menages
+        self.entity_by_name['individus_institutions'] = individus_institutions
+
         self.drop_variable({
             'menages': ['identmen', 'paje', 'complfam', 'allocpar', 'asf'],
             'individus': ['identmen', 'preret']
@@ -329,13 +367,12 @@ class Patrimoine(DataTil):
         if dict_to_drop is None:
             dict_to_drop = {}
 
-        # travail sur men
+        # travail sur ménages
             all = menages.columns.tolist()
             # liste noire
-            pr_or_cj = [x for x in all if (x[-2:] == 'pr' or x[-2:] == 'cj')
-                        and x not in ['indepr', 'r_dcpr', 'r_detpr']]
-            detention = [x for x in all if len(x) == 6 and x[0] == 'p'
-                         and x[1] in ['0', '1']]
+            pr_or_cj = [
+                x for x in all if (x[-2:] == 'pr' or x[-2:] == 'cj') and x not in ['indepr', 'r_dcpr', 'r_detpr']]
+            detention = [x for x in all if len(x) == 6 and x[0] == 'p' and x[1] in ['0', '1']]
             diplom = [x for x in all if x[:6] == 'diplom']
             partner_died = [x for x in all if x[:2] == 'cj']
             even_rev = [x for x in all if x[:3] == 'eve']
@@ -351,7 +388,7 @@ class Patrimoine(DataTil):
             else:
                 dict_to_drop['menages'] = black_list
 
-        # travail sur ind
+        # travail sur individus
             all = individus.columns.tolist()
             # liste noire
             parent_prop = [x for x in all if x[:6] == 'jepro_']
@@ -363,11 +400,12 @@ class Patrimoine(DataTil):
             famille = ['couple', 'lienpref', 'enf', 'civilstate', 'pacs', 'grandpar', 'per1e', 'mer1e', 'enfant']
             jobmarket = ['statut', 'situa', 'workstate', 'preret', 'classif', 'cs42']
             info_parent = ['jepnais', 'jemnais', 'jemprof']
+            dependance = ['data_origin', 'dependance_level']
             carriere = [x for x in all if x[:2] == 'cy' and x not in ['cyder', 'cysubj']] + \
                 ['jeactif', 'anfinetu', 'prodep']
             revenus = ["zsalaires_i", "zchomage_i", "zpenalir_i", "zretraites_i", "cyder", "duree"]
             white_list = ['identmen', 'idmen', 'noi', 'pond', 'id', 'identind', 'period'] + info_pers + famille + \
-                jobmarket + carriere + info_parent + revenus
+                jobmarket + carriere + info_parent + revenus + dependance
 
             if option == 'white':
                 dict_to_drop['individus'] = [x for x in all if x not in white_list]
@@ -383,6 +421,7 @@ class Patrimoine(DataTil):
         # pour simplifier on créer une variable lien qui à la même valeur pour les personnes
         # potentielleùent en couple
         # Elle est plus pratique que lienpref (lien avec la personne de référence)
+        # Pour les individus en institutions on a initialisé lienpref à 0
         individus['lien'] = individus['lienpref'].replace([1, 31, 32, 50], [0, 2, 3, 10])
         # Les gens mariés ou pacsés sont considéré en couple par définition (pas d'union factice):
         # reminder couple:
@@ -420,18 +459,11 @@ class Patrimoine(DataTil):
         # Change les personnes qui se disent en couple en couple hors domicile
         # (on pourrait mettre non en couple aussi)
         cond_hdom = individus[individus['couple'] == 1].groupby(['idmen', 'lien']).size() == 1
-#        cond_hdom2 = (
-#            individus.groupby(['idmen', 'lien', 'couple'])['couple'].transform('count') == 1
-#            ) & (
-#            individus['couple'] == 1
-#            )
-#        individus['couple2'] = individus['couple'].values
 
         to_change = cond_hdom[cond_hdom].reset_index()
         to_change = merge(individus[individus['couple'] == 1], to_change, how='inner')
 
         individus.loc[to_change['id'].values, 'couple'] = 2
-#        individus.loc[cond_hdom2, 'couple2'] = 2
 
         # On ne cherche que les identifiants des couple vivant ensemble.
         assert sum(~individus[individus['couple'] == 1].groupby(['idmen', 'lien']).size() == 2) == 0
@@ -539,15 +571,15 @@ class Patrimoine(DataTil):
             ]
         potential_mother = potential_mother[~potential_mother['id'].isin(look_mother['id'])]
         match_mother = look_mother.merge(potential_mother, on=['idmen'], suffixes=('_enf', '_par'))
-        match_mother.sort(
-            columns = ['idmen', 'lienpref_par', 'age_en_mois_par'],
+        match_mother.sort_values(
+            by = ['idmen', 'lienpref_par', 'age_en_mois_par'],
             ascending = [True, False, False],
             inplace = True
             )
-        match_mother.drop_duplicates('id_enf', take_last=False, inplace=True)
+        match_mother.drop_duplicates('id_enf', keep='first', inplace=True)
         individus.loc[match_mother['id_enf'].values, 'mere'] = match_mother['id_par'].values
         self._check_links(individus)
-        # TODO: Find a better afectation rule
+        # TODO: Find a better affectation rule
         look_father = individus.loc[
             (individus['per1e'] == 1) & (individus['pere'] == -1),
             ['idmen', 'lienpref', 'id', 'age_en_mois']
@@ -559,12 +591,12 @@ class Patrimoine(DataTil):
             ]
         potential_father = potential_father[~potential_father['id'].isin(look_father['id'])]
         match_father = look_father.merge(potential_father, on=['idmen'], suffixes=('_enf', '_par'))
-        match_father.sort(
-            columns=['idmen', 'lienpref_par', 'age_en_mois_par'],
+        match_father.sort_values(
+            by = ['idmen', 'lienpref_par', 'age_en_mois_par'],
             ascending = [True, False, False],
-            inplace=True
+            inplace = True
             )
-        match_father.drop_duplicates('id_enf', take_last=False, inplace=True)
+        match_father.drop_duplicates('id_enf', keep='first', inplace=True)
         individus.loc[match_father['id_enf'].values, 'pere'] = match_father['id_par'].values
         self._check_links(individus)
         log.info('Nombre de mineurs sans parents : {}'.format(
@@ -903,26 +935,23 @@ class Patrimoine(DataTil):
 
     def calmar_demography(self):
         # TODO: Cette méthode doit être utilisée avec précaution. Elle a été introduite
-        # pour recaler des données ne conetnant pas les individus en institution
-        from openfisca_core.calmar import calmar  # , check_calmar
+        # pour recaler des données ne contenant pas les individus en institution
         individus = self.entity_by_name['individus']
         menages = self.entity_by_name['menages']
-
         individus_extraction = individus[['age', 'idmen', 'sexe']].copy()
         menages_extraction = menages[['id', 'pond']].copy()
         decades_by_sexe = dict()
 
         for sexe in [0, 1]:
             individus_extraction['decade'] = individus_extraction.age.loc[individus_extraction.sexe == sexe] // 10
-            decades = individus_extraction.age.loc[individus_extraction.sexe == sexe].unique()
-            # assert ages == range(max(ages) + 1)
+            decades = individus_extraction.decade.loc[individus_extraction.sexe == sexe].unique()
             for decade in list(decades):
                 individus_extraction['dummy_decade'] = (individus_extraction.decade == decade) * 1
                 dummy = individus_extraction[['dummy_decade', 'idmen']].groupby(by = 'idmen').sum().reset_index()
-                dummy.rename(columns = {'dummy_decade': '{}_{}'.format(decade, sexe), 'idmen': 'id'}, inplace = True)
+                dummy.rename(
+                    columns = {'dummy_decade': '{}_{}'.format(str(int(decade)), sexe), 'idmen': 'id'}, inplace = True)
                 menages_extraction = menages_extraction.merge(dummy, on = 'id')
-            decades_by_sexe[sexe] = ['{}_{}'.format(decade, sexe) for decade in decades]
-
+            decades_by_sexe[sexe] = ['{}_{}'.format(str(int(decade)), sexe) for decade in decades]
         data_in = dict()
 
         for col in decades_by_sexe[0] + decades_by_sexe[1] + ['id', 'pond']:
@@ -935,8 +964,12 @@ class Patrimoine(DataTil):
             insee.index = ['{}_{}'.format(decade, sexe_number) for decade in insee.index]
             margins_by_decade.update(insee.to_dict())
 
-        print margins_by_decade
-
+        log.info('''Marges par décade et sexe.
+Hommes: {}
+Femmes: {}'''.format(
+                [(decade, margins_by_decade['{}_0'.format(decade)]) for decade in range(0, 11)],
+                [(decade, margins_by_decade['{}_1'.format(decade)]) for decade in range(0, 11)]
+                ))
         parameters = dict(
             method = 'logit',
             lo = 1.0 / 3.0,
@@ -945,16 +978,15 @@ class Patrimoine(DataTil):
         pondfin_out, lambdasol, margins_new_dict = calmar(
             data_in, margins_by_decade, parameters = parameters, pondini = 'pond')
 
-#        check_calmar(data_in, margins_by_decade, pondini = 'pond', pondfin_out = pondfin_out, lambdasol = lambdasol,
-#            margins_new_dict = margins_new_dict)
+        # check_calmar(data_in, margins_by_decade, pondini = 'pond', pondfin_out = pondfin_out, lambdasol = lambdasol,
+        #    margins_new_dict = margins_new_dict)
 
         menages['pondini'] = menages.pond.copy()
         menages.pond = pondfin_out
         self.entity_by_name['menages'] = menages
 
 
-if __name__ == '__main__':
-
+def test_build():
     logging.basicConfig(level = logging.INFO, stream = sys.stdout)
     import time
     start_t = time.time()
@@ -980,13 +1012,24 @@ if __name__ == '__main__':
     data.format_to_liam()
     data.final_check()
     data.store_to_liam()
+    menages = data.entity_by_name['menages']
     individus = data.entity_by_name['individus']
+    individus_institutions = data.entity_by_name['individus_institutions']
 
     log.info(u"Temps de calcul : {} s".format(time.time() - start_t))
-    log.info(u"Nombre d'individus de la table final : ", len(individus))
+    log.info(u"Nombre d'individus de la table final : {}".format(len(individus)))
+
     # des petites verifs finales
     individus['en_couple'] = individus['partner'] > -1
     test = individus['partner'] > -1
 
     assert list(individus.partner.value_counts()[individus.partner.value_counts() > 1].index) == [-1]
     log.info(individus.groupby(['civilstate', 'en_couple']).size())
+    assert individus.query('civilstate == 1')['en_couple'].all()
+    assert individus.query('civilstate == 5')['en_couple'].all()
+    log.info(individus['data_origin'].value_counts(dropna = False))
+    log.info(individus_institutions['data_origin'].value_counts(dropna = False))
+
+
+if __name__ == '__main__':
+    test_build()
