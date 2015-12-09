@@ -6,16 +6,9 @@ from __future__ import print_function
 
 import numpy as np
 
-try:
-    from liam2.expr import always, expr_eval, FunctionExpr
-except ImportError:
-    from src.expr import always, expr_eval, FunctionExpr
+from liam2.expr import always, expr_eval, FunctionExpr
 
-try:
-    from liam2.exprbases import FilteredExpression #, FunctionExpr)
-except ImportError:
-    from src.exprbases import FilteredExpression
-
+from liam2.exprbases import FilteredExpression #, FunctionExpr)
 
 from til.pgm.run_pension import get_pension
 
@@ -68,8 +61,6 @@ class AddTime(FunctionExpr):
     dtype = always(int)
 
 #------------------------------------
-
-
 
 
 def check_structure(simulation):
