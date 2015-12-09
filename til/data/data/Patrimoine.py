@@ -38,7 +38,8 @@ class Patrimoine(DataTil):
         self.name = 'Patrimoine'
         self.survey_year = 2009
         self.last_year = 2009
-        self.survey_date = 100 * self.survey_year + 1
+        # self.survey_date = 100 * self.survey_year + 1
+        self.survey_date = self.survey_year
         # TODO: Faire une fonction qui check où on en est, si les précédent on
         # bien été fait, etc.
         # TODO: Dans la même veine, on devrait définir la suppression des
@@ -150,7 +151,7 @@ class Patrimoine(DataTil):
         individus['period'] = self.survey_date
         menages['period'] = self.survey_date
         # age_en_mois
-        age = self.survey_date / 100 - individus['anais']
+        age = self.survey_year - individus['anais']
         individus['age_en_mois'] = 12 * age + 11 - individus['mnais']
 
         individus['sexe'].replace([1, 2], [0, 1], inplace=True)
@@ -195,7 +196,7 @@ class Patrimoine(DataTil):
 
         individus['data_origin'] = 0
         individus_institutions['data_origin'] = 1
-        age = self.survey_date / 100 - individus_institutions['anais']
+        age = self.survey_year - individus_institutions['anais']
         individus_institutions['age_en_mois'] = 12 * age + 11 - individus_institutions['mnais'].values
         individus_institutions['lienpref'] = 0
         individus_institutions['workstate'] = 1  # inactif

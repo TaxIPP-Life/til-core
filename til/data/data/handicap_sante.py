@@ -218,7 +218,6 @@ if __name__ == "__main__":
     final_dataframe.loc[final_dataframe.rgir <= 0, 'rgir'] = 0
     final_dataframe.loc[final_dataframe.rgir >= 6, 'rgir'] = 6
 
-
     save(final_dataframe)
 
 

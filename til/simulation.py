@@ -3,7 +3,6 @@ from __future__ import print_function, division
 
 
 from collections import defaultdict
-import functools
 import os.path
 import random
 import time
@@ -30,8 +29,8 @@ from liam2.utils import (time2str, timed, gettime, validate_dict, field_str_to_t
 from liam2.simulation import (expand_periodic_fields, handle_imports, show_top_processes, Simulation)
 
 
-from til.utils import addmonth, time_period
-from til.process import ExtProcess
+# from til.utils import addmonth, time_period
+# from til.process import ExtProcess
 
 
 class TilSimulation(Simulation):
@@ -113,7 +112,7 @@ class TilSimulation(Simulation):
                 '#annee': int
                 },
             'final_stat': bool,
-            'time_scale': str,
+#            'time_scale': str,
             'retro': bool,
             'logging': {
                 'timings': bool,
@@ -135,7 +134,7 @@ class TilSimulation(Simulation):
     def __init__(self, globals_def, periods, start_period, init_processes,
                  processes, entities, input_method, input_path, output_path,
                  default_entity=None, runs=1, legislation = None, final_stat = False,
-                 time_scale = 'year0', retro = False, uniform_weight = None):
+                 uniform_weight = None):
         if 'periodic' in globals_def:
             declared_fields = globals_def['periodic']['fields']
             fnames = {fname for fname, type_ in declared_fields}
@@ -145,13 +144,6 @@ class TilSimulation(Simulation):
         self.globals_def = globals_def
         self.periods = periods
         print(self.periods)
-        # TODO: work on it for start with seme
-        assert(isinstance(start_period, int))
-        if time_scale == 'year0':
-            assert 0 <= start_period <= 9999, "{} is a non valid start period".format(start_period)
-        if time_scale == 'year':
-            assert 0 <= start_period <= 999999, "{} is a non valid start period".format(start_period)
-            assert (start_period % 100) in range(1, 12), "{} is a non valid start period".format(start_period)
 
         self.start_period = start_period
         # init_processes is a list of tuple: (process, 1)
@@ -159,8 +151,6 @@ class TilSimulation(Simulation):
         # processes is a list of tuple: (process, periodicity, start)
         self.processes = processes
         self.entities = entities
-        self.time_scale = time_scale
-        self.retro = retro
 
         if input_method == 'h5':
             data_source = H5Source(input_path)
@@ -212,28 +202,10 @@ class TilSimulation(Simulation):
             random.seed(seed)
             np.random.seed(seed)
 
-        time_scale = simulation_def.get('time_scale', 'year0')
-        retro = simulation_def.get('retro', False)
-
         if periods is None:
             periods = simulation_def['periods']
         if start_period is None:
             start_period = simulation_def['start_period']
-        init_period = simulation_def.get('init_period', None)
-
-        if start_period is None and init_period is None:
-            raise Exception("Either start_period either init_period should be given.")
-        if start_period is not None:
-            if init_period is not None:
-                raise Exception("Start_period can't be given if init_period is.")
-            step = time_period[time_scale] * (1 - 2 * (retro))
-            print(time_scale)
-            if time_scale == 'year0':
-                init_period = addmonth(start_period, step)
-            else:
-                init_period = start_period
-            print('init_period')
-            print(init_period)
 
         if skip_shows is None:
             skip_shows = simulation_def.get('skip_shows', config.skip_shows)
@@ -398,8 +370,6 @@ class TilSimulation(Simulation):
             runs = runs,
             legislation = legislation,
             final_stat = final_stat,
-            time_scale = time_scale,
-            retro = retro,
             )
 
     @classmethod
@@ -434,7 +404,6 @@ class TilSimulation(Simulation):
                               self.entities_map)
 
         globals_data = input_dataset.get('globals')
-        self.data_sink.close()
         timed(self.data_sink.prepare, self.globals_def, self.entities_map,
               input_dataset, self.start_period - 1)
 
@@ -470,22 +439,13 @@ class TilSimulation(Simulation):
         process_time = defaultdict(float)
         period_objects = {}
         eval_ctx = EvaluationContext(self, self.entities_map, globals_data)
-        eval_ctx.periodicity = time_period[self.time_scale] * (1 - 2 * (self.retro))
-        eval_ctx.format_date = self.time_scale
 
-        def simulate_period(period_idx, period, periods, processes, entities,
+        def simulate_period(period_idx, period, processes, entities,
                             init=False):
             period_start_time = time.time()
 
-            # period_idx: index of current computed period
-            # periods list of all periods
-            # period = periods[period_idx]
-
             # set current period
             eval_ctx.period = period
-            eval_ctx.periods = periods
-            eval_ctx.period_idx = period_idx + 1
-            print(eval_ctx.period_idx)
 
             if config.log_level in ("functions", "processes"):
                 print()
@@ -558,35 +518,14 @@ class TilSimulation(Simulation):
                         print("- %d/%d" % (p_num, num_processes), process.name,
                               end=' ')
                         print("...", end=' ')
-
-                    # TDOD: change that
-                    print('periodicity: {}'.format(periodicity))
-                    if isinstance(periodicity, int):
-                        if period_idx % periodicity == 0:
-                            elapsed, _ = gettime(process.run_guarded, eval_ctx)
-                        else:
-                            elapsed = 0
-                            if config.log_level in ("functions", "processes"):
-                                print("skipped (periodicity)")
+                    print(period_idx)
+                    print(periodicity)
+                    if period_idx % periodicity == 0:
+                        elapsed, _ = gettime(process.run_guarded, eval_ctx)
                     else:
-                        assert periodicity in time_period
-                        periodicity_process = time_period[periodicity]
-                        periodicity_simul = time_period[self.time_scale]
-                        month_idx = period % 100
-                        # first condition, to run a process with start == 12
-                        # each year even if year are yyyy01
-                        # modify start if periodicity_simul is not month
-                        start = int(start / periodicity_simul - 0.01) * periodicity_simul + 1
-
-                        if (periodicity_process <= periodicity_simul and self.time_scale != 'year0') or (
-                                month_idx % periodicity_process == start % periodicity_process):
-
-                            elapsed, _ = gettime(process.run_guarded, eval_ctx)
-
-                        else:
-                            elapsed = 0
-                            if config.log_level in ("function", "processes"):
-                                print("skipped (periodicity)")
+                        elapsed = 0
+                        if config.log_level in ("functions", "processes"):
+                            print("skipped (periodicity)")
 
                     process_time[process.name] += elapsed
                     if config.log_level in ("functions", "processes"):
@@ -638,24 +577,7 @@ class TilSimulation(Simulation):
  starting simulation
 =====================""")
         try:
-            assert(self.time_scale in time_period)
-            month_periodicity = time_period[self.time_scale]
-            time_direction = 1 - 2 * (self.retro)
-            time_step = month_periodicity * time_direction
-            if self.time_scale == 'year0':
-                periods = [self.start_period + t for t in range(0, (self.periods + 1))]
-            elif self.time_scale == 'year':
-                periods = [
-                    self.start_period + int(t / 12) * 100 + t % 12
-                    for t in range(0, (self.periods + 1) * time_step, time_step)
-                    ]
-
-            print("simulated period are going to be: ", periods)
-
-            init_start_time = time.time()
-            print(self.start_period)
-            print(periods[0])
-            simulate_period(0, self.start_period, [None, periods[0]], self.init_processes,
+            simulate_period(0, self.start_period - 1, self.init_processes,
                             self.entities, init=True)
             main_start_time = time.time()
             periods = range(self.start_period,

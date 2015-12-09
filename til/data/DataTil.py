@@ -11,13 +11,14 @@ import os
 import pdb
 
 
-import logging
 import numpy as np
 from pandas import merge, notnull, DataFrame, concat, HDFStore
 import tables
 
+import logging
 
 from til.data.utils.utils import replicate, new_link_with_men, of_name_to_til, new_idmen, count_dup
+from til.data.mortality_rates import add_mortality_rates
 
 from til_base_model.config import Config
 
@@ -608,19 +609,32 @@ class DataTil(object):
                     )
                 )
 
-        for table in [individus, menages, foyers_fiscaux, futur]:
-            if table is not None:
-                test_month = table['period'] % 100
-                assert all(test_month.isin(range(1, 13)))
-                test_year = table['period'] // 100
-                assert all(test_year.isin(range(1900, 2100)))
+        if self.survey_year != self.survey_date:  # pour les dates YYYYMM
+            for table in [individus, menages, foyers_fiscaux, futur]:
+                if table is not None:
+                    test_month = table['period'] % 100
+                    assert all(test_month.isin(range(1, 13)))
+                    test_year = table['period'] // 100
+                    assert all(test_year.isin(range(1900, 2100))), test_year.value_counts(dropna = False)
 
-        for name, table in self.longitudinal.iteritems():
-            cols = table.columns
-            cols_year = [(col // 100 in range(1900, 2100)) for col in cols]
-            cols_month = [(col % 100 in range(1, 13)) for col in cols]
-            assert all(cols_year)
-            assert all(cols_month)
+            for name, table in self.longitudinal.iteritems():
+                cols = table.columns
+                cols_year = [(col // 100 in range(1900, 2100)) for col in cols]
+                cols_month = [(col % 100 in range(1, 13)) for col in cols]
+                assert all(cols_year)
+                assert all(cols_month)
+
+        elif self.survey_year == self.survey_date:
+            for table in [individus, menages, foyers_fiscaux, futur]:
+                if table is not None:
+                    test_year = table['period']
+                    assert all(test_year.isin(range(1900, 2100))), test_year.value_counts(dropna = False)
+
+            for name, table in self.longitudinal.iteritems():
+                cols = table.columns
+                cols_year = [(col in range(1900, 2100)) for col in cols]
+                assert all(cols_year)
+                assert all(cols_month)
 
         # check reciprocity:
         assert all(individus.loc[individus['civilstate'].isin([1, 5]), 'partner'] > -1)
@@ -718,7 +732,7 @@ class DataTil(object):
             table['id'] = table.index
             store.append('longitudinal/' + varname, table)
         store.close()
-        from mortality_rates import add_mortality_rates
+        log.info("Adding mortality rates in node globals of file {}".format(path))
         add_mortality_rates(path)
         log.info("Added mortality rates in node globals of file {}".format(path))
         from til_base_model.targets.dependance import build_prevalence_all_years
