@@ -3,8 +3,11 @@ from __future__ import print_function, division
 
 
 from collections import defaultdict
+import datetime
+import pkg_resources
 import os.path
 import random
+import subprocess
 import time
 import warnings
 
@@ -18,7 +21,6 @@ from liam2.exprtools import functions
 from til import exprmisc
 functions.update(exprmisc.functions)
 
-
 # TilSimulation specific import
 from liam2 import config, console
 from liam2.context import EvaluationContext
@@ -28,10 +30,13 @@ from liam2.utils import (time2str, timed, gettime, validate_dict, field_str_to_t
      UserDeprecationWarning)
 from liam2.simulation import (expand_periodic_fields, handle_imports, show_top_processes, Simulation)
 
-
 # from til.utils import addmonth, time_period
 # from til.process import ExtProcess
 
+def get_git_head_revision(distribution_name):
+    distribution_location = pkg_resources.get_distribution(distribution_name).location
+    git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd = distribution_location)
+    return git_hash.strip()
 
 class TilSimulation(Simulation):
     index_for_person_variable_name_by_entity_name = {
@@ -134,7 +139,7 @@ class TilSimulation(Simulation):
     def __init__(self, globals_def, periods, start_period, init_processes,
                  processes, entities, input_method, input_path, output_path,
                  default_entity=None, runs=1, legislation = None, final_stat = False,
-                 uniform_weight = None):
+                 uniform_weight = None, config_log = None):
         if 'periodic' in globals_def:
             declared_fields = globals_def['periodic']['fields']
             fnames = {fname for fname, type_ in declared_fields}
@@ -167,6 +172,9 @@ class TilSimulation(Simulation):
         self.stepbystep = False
         self.runs = runs
 
+        self.save_log(config_log)
+        self.save_git_hash()
+
     @classmethod
     def from_str(cls, yaml_str, simulation_dir='',
                  input_dir=None, input_file=None,
@@ -179,7 +187,7 @@ class TilSimulation(Simulation):
         expand_periodic_fields(content)
         content = handle_imports(content, simulation_dir)
         validate_dict(content, cls.yaml_layout)
-
+        config_log = content.copy()
         # the goal is to get something like:
         # globals_def = {'periodic': {'fields': [('a': int), ...], ...},
         #                'MIG': {'type': int}}
@@ -370,6 +378,7 @@ class TilSimulation(Simulation):
             runs = runs,
             legislation = legislation,
             final_stat = final_stat,
+            config_log = config_log
             )
 
     @classmethod
@@ -639,3 +648,21 @@ class TilSimulation(Simulation):
     def close(self):
         self.data_source.close()
         self.data_sink.close()
+
+    def save_log(self, config_log):
+        assert config_log is not None
+        output_dir = os.path.dirname(self.data_sink.output_path)
+        file_path = os.path.join(output_dir, 'config_log.yml')
+        with open(file_path, 'w') as outfile:
+            outfile.write(yaml.dump(config_log))
+
+    def save_git_hash(self):
+        output_dir = os.path.dirname(self.data_sink.output_path)
+        file_path = os.path.join(output_dir, 'git_hash.txt')
+        time_stamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+        til_git_hash = get_git_head_revision('Til')
+        til_base_model_git_hash = get_git_head_revision('Til-BaseModel')
+        with open(file_path, "w") as text_file:
+            text_file.write("""Running at {}
+til: {}
+til_base_model: {}""".format(time_stamp, til_git_hash, til_base_model_git_hash))
