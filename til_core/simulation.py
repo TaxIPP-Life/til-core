@@ -18,7 +18,7 @@ import yaml
 # Monkey patching liam2
 from liam2.exprtools import functions
 
-from til import exprmisc
+from til_core import exprmisc
 functions.update(exprmisc.functions)
 
 # TilSimulation specific import
@@ -660,8 +660,8 @@ class TilSimulation(Simulation):
         output_dir = os.path.dirname(self.data_sink.output_path)
         file_path = os.path.join(output_dir, 'git_hash.txt')
         time_stamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
-        til_git_hash = get_git_head_revision('Til')
-        til_base_model_git_hash = get_git_head_revision('Til-BaseModel')
+        til_git_hash = get_git_head_revision('Til-Core')
+        til_base_model_git_hash = get_git_head_revision('Til-France')
         with open(file_path, "w") as text_file:
             text_file.write("""Running at {}
 til: {}

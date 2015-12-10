@@ -45,8 +45,8 @@ doc_lines = __doc__.split('\n')
 
 
 setup(
-    name = 'Til',
-    version = '0.1dev',
+    name = 'Til-Core',
+    version = '0.1.dev0',
 
     author = 'TaxIPP-Life (TIL) Team',
     author_email = 'alexis.eidelman.pro@gmail.com',
@@ -55,7 +55,7 @@ setup(
     keywords = 'benefit microsimulation social tax life-cycle',
     license = 'http://www.fsf.org/licensing/licenses/agpl-3.0.html',
     long_description = '\n'.join(doc_lines[2:]),
-    url = 'https://github.com/TaxIPP-Life/Til',
+    url = 'https://github.com/TaxIPP-Life/Til-Core',
     install_requires = [
         'numpy',
         ],
