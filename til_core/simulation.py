@@ -59,6 +59,7 @@ class TilSimulation(Simulation):
         'globals': {
             'periodic': None,  # either full-blown (dict) description or list
                                # of fields
+            'weight': None,
             '*': {
                 'path': str,
                 'type': str,
@@ -72,8 +73,8 @@ class TilSimulation(Simulation):
                     '*': str
                     },
                 'invert': [str],
-                'transposed': bool
-                }
+                'transposed': bool,
+                },
             },
         '#entities': {
             '*': {
@@ -148,7 +149,6 @@ class TilSimulation(Simulation):
 
         self.globals_def = globals_def
         self.periods = periods
-        print(self.periods)
 
         self.start_period = start_period
         # init_processes is a list of tuple: (process, 1)
@@ -172,6 +172,7 @@ class TilSimulation(Simulation):
         self.stepbystep = False
         self.runs = runs
 
+        self.uniform_weight = uniform_weight
         self.save_log(config_log)
         self.save_git_hash()
 
@@ -182,10 +183,11 @@ class TilSimulation(Simulation):
                  start_period=None, periods=None, seed=None,
                  skip_shows=None, skip_timings=None, log_level=None,
                  assertions=None, autodump=None, autodiff=None,
-                 runs=None):
+                 runs=None, uniform_weight=None):
         content = yaml.load(yaml_str)
         expand_periodic_fields(content)
         content = handle_imports(content, simulation_dir)
+
         validate_dict(content, cls.yaml_layout)
         config_log = content.copy()
         # the goal is to get something like:
@@ -193,14 +195,15 @@ class TilSimulation(Simulation):
         #                'MIG': {'type': int}}
         globals_def = {}
         for k, v in content.get('globals', {}).iteritems():
-            if "type" in v:
+            if k == 'weight':
+               pass
+            elif "type" in v:
                 v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
             else:
                 # TODO: fields should be optional (would use all the fields
                 # provided in the file)
                 v["fields"] = fields_yaml_to_type(v["fields"])
             globals_def[k] = v
-
         simulation_def = content['simulation']
         if seed is None:
             seed = simulation_def.get('random_seed')
@@ -378,8 +381,8 @@ class TilSimulation(Simulation):
             runs = runs,
             legislation = legislation,
             final_stat = final_stat,
-            config_log = config_log
-            )
+            config_log = config_log,
+            uniform_weight = uniform_weight)
 
     @classmethod
     def from_yaml(cls, fpath,
@@ -388,7 +391,7 @@ class TilSimulation(Simulation):
                   start_period=None, periods=None, seed=None,
                   skip_shows=None, skip_timings=None, log_level=None,
                   assertions=None, autodump=None, autodiff=None,
-                  runs=None):
+                  runs=None, uniform_weight=None):
         with open(fpath) as f:
             return cls.from_str(f, os.path.dirname(os.path.abspath(fpath)),
                                 input_dir, input_file,
@@ -396,7 +399,7 @@ class TilSimulation(Simulation):
                                 start_period, periods, seed,
                                 skip_shows, skip_timings, log_level,
                                 assertions, autodump, autodiff,
-                                runs)
+                                runs, uniform_weight)
 
     def load(self):
         return timed(self.data_source.load, self.globals_def, self.entities_map)
@@ -648,6 +651,7 @@ class TilSimulation(Simulation):
     def close(self):
         self.data_source.close()
         self.data_sink.close()
+
 
     def save_log(self, config_log):
         assert config_log is not None
