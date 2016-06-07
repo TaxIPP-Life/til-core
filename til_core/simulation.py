@@ -7,7 +7,9 @@ import datetime
 import pkg_resources
 import os.path
 import random
+import shutil
 import subprocess
+import sys
 import time
 import warnings
 
@@ -638,9 +640,35 @@ class TilSimulation(Simulation):
             if h5_autodump is not None:
                 h5_autodump.close()
 
-    def run(self, run_console=False):
+    def run(self, run_console=False, log = False):
+
+        if log:
+            output_dir = os.path.dirname(self.data_sink.output_path)
+            logfile = os.path.join(output_dir, 'log.txt')
+
+            class Tee(object):
+                def __init__(self, *files):
+                    self.files = files
+
+                def write(self, obj):
+                    for f in self.files:
+                        f.write(obj)
+
+                def flush(self):
+                    for f in self.files:
+                        f.flush()
+
+
+            f = open(logfile, 'w')
+            backup = sys.stdout
+            sys.stdout = Tee(sys.stdout, f)
+
         for i in range(int(self.runs)):
             self.run_single(run_console, i)
+
+        if log:
+            sys.stdout = backup
+
 
     def start_console(self, context):
         if self.stepbystep:
@@ -651,7 +679,6 @@ class TilSimulation(Simulation):
     def close(self):
         self.data_source.close()
         self.data_sink.close()
-
 
     def save_log(self, config_log):
         assert config_log is not None
@@ -670,3 +697,38 @@ class TilSimulation(Simulation):
             text_file.write("""Running at {}
 til: {}
 til_base_model: {}""".format(time_stamp, til_git_hash, til_base_model_git_hash))
+
+    def backup(self, backup_path = None, erase = False):
+        assert backup_path is not None
+        output_dir = os.path.dirname(self.data_sink.output_path)
+        if not os.path.isabs(backup_path):
+            backup_path = os.path.join(os.path.dirname(output_dir), backup_path)
+
+        if os.path.exists(backup_path):
+            if erase:
+                shutil.rmtree(backup_path)
+            else:
+                print('{} already exist. If you want to erase it anyway, trigger the erase option'.format(backup_path))
+                return
+
+        shutil.copytree(output_dir, backup_path)
+
+    def load_backup(self, backup_path = None, erase = False, ignore_h5 = True):
+        assert backup_path is not None
+        output_dir = os.path.dirname(self.data_sink.output_path)
+        ignore = shutil.ignore_patterns('*.h5') if ignore_h5 else None
+        if not os.path.isabs(backup_path):
+            backup_path = os.path.join(os.path.dirname(output_dir), backup_path)
+
+        if not os.path.exists(backup_path):
+            print('{} does not exist.'.format(backup_path))
+            return
+
+        if not erase:
+            time_stamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
+            stash_path = os.path.join(output_dir, 'stash_{}'.format(time_stamp))
+            print('savind current work in {}'.format(stash_path))
+            shutil.copytree(output_dir, stash_path, ignore = ignore)
+
+        shutil.rmtree(output_dir)
+        shutil.copytree(backup_path, output_dir, ignore = ignore)
