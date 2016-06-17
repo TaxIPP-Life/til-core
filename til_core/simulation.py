@@ -35,10 +35,12 @@ from liam2.simulation import (expand_periodic_fields, handle_imports, show_top_p
 # from til.utils import addmonth, time_period
 # from til.process import ExtProcess
 
+
 def get_git_head_revision(distribution_name):
     distribution_location = pkg_resources.get_distribution(distribution_name).location
     git_hash = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd = distribution_location)
     return git_hash.strip()
+
 
 class TilSimulation(Simulation):
     index_for_person_variable_name_by_entity_name = {
@@ -120,7 +122,7 @@ class TilSimulation(Simulation):
                 '#annee': int
                 },
             'final_stat': bool,
-#            'time_scale': str,
+            # 'time_scale': str,
             'retro': bool,
             'logging': {
                 'timings': bool,
@@ -142,7 +144,7 @@ class TilSimulation(Simulation):
     def __init__(self, globals_def, periods, start_period, init_processes,
                  processes, entities, input_method, input_path, output_path,
                  default_entity=None, runs=1, legislation = None, final_stat = False,
-                 uniform_weight = None, config_log = None):
+                 uniform_weight = None, config_log = None, console_path = None):
         if 'periodic' in globals_def:
             declared_fields = globals_def['periodic']['fields']
             fnames = {fname for fname, type_ in declared_fields}
@@ -177,6 +179,8 @@ class TilSimulation(Simulation):
         self.uniform_weight = uniform_weight
         self.save_log(config_log)
         self.save_git_hash()
+        self.console_path = console_path
+        self.input_path = input_path
 
     @classmethod
     def from_str(cls, yaml_str, simulation_dir='',
@@ -185,7 +189,7 @@ class TilSimulation(Simulation):
                  start_period=None, periods=None, seed=None,
                  skip_shows=None, skip_timings=None, log_level=None,
                  assertions=None, autodump=None, autodiff=None,
-                 runs=None, uniform_weight=None):
+                 runs=None, uniform_weight=None, console_path = None):
         content = yaml.load(yaml_str)
         expand_periodic_fields(content)
         content = handle_imports(content, simulation_dir)
@@ -198,7 +202,7 @@ class TilSimulation(Simulation):
         globals_def = {}
         for k, v in content.get('globals', {}).iteritems():
             if k == 'weight':
-               pass
+                pass
             elif "type" in v:
                 v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
             else:
@@ -384,7 +388,8 @@ class TilSimulation(Simulation):
             legislation = legislation,
             final_stat = final_stat,
             config_log = config_log,
-            uniform_weight = uniform_weight)
+            uniform_weight = uniform_weight,
+            console_path = console_path)
 
     @classmethod
     def from_yaml(cls, fpath,
@@ -401,7 +406,7 @@ class TilSimulation(Simulation):
                                 start_period, periods, seed,
                                 skip_shows, skip_timings, log_level,
                                 assertions, autodump, autodiff,
-                                runs, uniform_weight)
+                                runs, uniform_weight, console_path = fpath)
 
     def load(self):
         return timed(self.data_source.load, self.globals_def, self.entities_map)
@@ -658,7 +663,6 @@ class TilSimulation(Simulation):
                     for f in self.files:
                         f.flush()
 
-
             f = open(logfile, 'w')
             backup = sys.stdout
             sys.stdout = Tee(sys.stdout, f)
@@ -669,6 +673,39 @@ class TilSimulation(Simulation):
         if log:
             sys.stdout = backup
 
+    def run_multiple(self, log = False, seeds = None):
+        assert seeds is not None
+        if isinstance(seeds, int):
+            seeds = range(seeds)
+        assert isinstance(seeds, list)
+        assert all(isinstance(seed, int) for seed in seeds)
+
+        replication_number = 0
+        for seed in seeds:
+            input_dir = os.path.dirname(self.input_path)
+            input_file = os.path.basename(self.input_path)
+            if os.path.exists(self.data_sink.output_path):
+                shutil.rmtree(os.path.dirname(self.data_sink.output_path))
+            output_dir = os.path.join(
+                os.path.dirname(self.data_sink.output_path),
+                'replication' + '_' + str(replication_number)
+                )
+            replication_number += 1
+            if os.path.exists(output_dir):
+                shutil.rmtree(output_dir)
+            assert self.console_path is not None
+            simulation = TilSimulation.from_yaml(
+                self.console_path,
+                input_dir = input_dir, input_file = input_file,
+                output_dir = output_dir,
+                seed = seed
+                )
+            simulation.run(False)
+            # Remove all h5 files because they are too heavy !
+
+            for f in os.listdir(output_dir):
+                if f.endswith('.h5'):
+                    os.remove(os.path.join(output_dir, f))
 
     def start_console(self, context):
         if self.stepbystep:
