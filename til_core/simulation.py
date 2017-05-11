@@ -19,7 +19,6 @@ import yaml
 
 # Monkey patching liam2
 from liam2.exprtools import functions
-
 from til_core import exprmisc
 functions.update(exprmisc.functions)
 
@@ -78,6 +77,7 @@ class TilSimulation(Simulation):
                     },
                 'invert': [str],
                 'transposed': bool,
+                'value': None,  # Or(str, bool, int, float})
                 },
             },
         '#entities': {
@@ -110,10 +110,10 @@ class TilSimulation(Simulation):
             'random_seed': int,
             'input': {
                 'path': str,
-                'file': str,
+                '#file': str,
                 'method': str
                 },
-            'output': {
+            '#output': {
                 'path': str,
                 'file': str
                 },
@@ -129,7 +129,7 @@ class TilSimulation(Simulation):
                 'level': str,  # Or('periods', 'functions', 'processes')
             },
             '#periods': int,
-            'start_period': int,
+            '#start_period': int,
             'init_period': int,
             'skip_shows': bool,
             'timings': bool,    # deprecated
@@ -143,8 +143,30 @@ class TilSimulation(Simulation):
 
     def __init__(self, globals_def, periods, start_period, init_processes,
                  processes, entities, input_method, input_path, output_path,
-                 default_entity=None, runs=1, legislation = None, final_stat = False,
+                 default_entity=None, runs=1, minimal_output=False, legislation = None, final_stat = False,
                  uniform_weight = None, config_log = None, console_path = None):
+        """
+
+        Parameters
+        ----------
+        globals_def
+        periods
+        start_period
+        init_processes
+        processes
+        entities : list of Entity
+        input_method
+        input_path
+        output_path
+        default_entity
+        runs
+        minimal_output
+        legislation
+        final_stat
+        uniform_weight
+        config_log
+        console_path
+        """
         if 'periodic' in globals_def:
             declared_fields = globals_def['periodic']['fields']
             fnames = {fname for fname, type_ in declared_fields}
@@ -153,7 +175,6 @@ class TilSimulation(Simulation):
 
         self.globals_def = globals_def
         self.periods = periods
-
         self.start_period = start_period
         # init_processes is a list of tuple: (process, 1)
         self.init_processes = init_processes
@@ -175,6 +196,7 @@ class TilSimulation(Simulation):
 
         self.stepbystep = False
         self.runs = runs
+        self.minimal_output = minimal_output
 
         self.uniform_weight = uniform_weight
         self.save_log(config_log)
@@ -193,9 +215,9 @@ class TilSimulation(Simulation):
         content = yaml.load(yaml_str)
         expand_periodic_fields(content)
         content = handle_imports(content, simulation_dir)
-
         validate_dict(content, cls.yaml_layout)
         config_log = content.copy()
+
         # the goal is to get something like:
         # globals_def = {'periodic': {'fields': [('a': int), ...], ...},
         #                'MIG': {'type': int}}
@@ -203,13 +225,18 @@ class TilSimulation(Simulation):
         for k, v in content.get('globals', {}).iteritems():
             if k == 'weight':
                 pass
-            elif "type" in v:
-                v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
-            else:
-                # TODO: fields should be optional (would use all the fields
-                # provided in the file)
-                v["fields"] = fields_yaml_to_type(v["fields"])
-            globals_def[k] = v
+        else:
+            try:
+                if "type" in v:
+                    v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
+                else:
+                    # TODO: fields should be optional (would use all the fields
+                    # provided in the file)
+                    v["fields"] = fields_yaml_to_type(v["fields"])
+                globals_def[k] = v
+            except TypeError:
+                globals_def[k] = v
+
         simulation_def = content['simulation']
         if seed is None:
             seed = simulation_def.get('random_seed')
@@ -248,10 +275,10 @@ class TilSimulation(Simulation):
                           UserDeprecationWarning)
             config.show_timings = simulation_def['timings']
 
-        if skip_timings:
-            show_timings = False
-        else:
+        if skip_timings is None:
             show_timings = logging_def.get('timings', config.show_timings)
+        else:
+            show_timings = not skip_timings
         config.show_timings = show_timings
 
         if autodump is None:
@@ -297,11 +324,23 @@ class TilSimulation(Simulation):
             os.makedirs(output_directory)
         config.output_directory = output_directory
 
+        minimal_output = False
         if output_file is None:
             output_file = output_def.get('file')
             assert output_file is not None
+            if output_file:
+                output_path = os.path.join(output_dir, output_file)
+            else:
+                # using a temporary directory instead of a temporary file
+                # because tempfile.* only returns file-like objects (which
+                # pytables does not support) or directories, not file names.
+                tmp_dir = tempfile.mkdtemp(prefix='liam2-', suffix='-tmp',
+                                           dir=output_dir)
+                output_path = os.path.join(tmp_dir, 'simulation.h5')
+                minimal_output = True
 
-        output_path = os.path.join(output_directory, output_file)
+        else:
+            output_path = os.path.join(output_directory, output_file)
 
         entities = {}
         for k, v in content['entities'].iteritems():
@@ -315,11 +354,54 @@ class TilSimulation(Simulation):
         parsing_context = global_context.copy()
         parsing_context.update((entity.name, entity.all_symbols(global_context))
                                for entity in entities.itervalues())
+        # compute the lag variable for each entity (an entity can cause fields from
+        # other entities to be added via links)
+        # dict of sets
+        lag_vars_by_entity = defaultdict(set)
         for entity in entities.itervalues():
             parsing_context['__entity__'] = entity.name
             entity.parse_processes(parsing_context)
-            entity.compute_lagged_fields()
-            # entity.optimize_processes()
+            entity_lag_vars = entity.compute_lagged_fields()
+            for e in entity_lag_vars:
+                lag_vars_by_entity[e.name] |= entity_lag_vars[e]
+
+        # store that in entity.lag_fields and create entity.array_lag
+        for entity in entities.itervalues():
+            entity_lag_vars = lag_vars_by_entity[entity.name]
+            if entity_lag_vars:
+                # make sure we have an 'id' column, and that it comes first
+                # (makes debugging easier). 'id' is always necessary for lag
+                # expressions to be able to "expand" the vector of values to the
+                # "current" individuals.
+                entity_lag_vars.discard('id')
+                sorted_vars = ['id'] + sorted(entity_lag_vars)
+                field_type = dict(entity.fields.name_types)
+                lag_fields = [(v, field_type[v]) for v in sorted_vars]
+                # FIXME: this should be initialized to the data from
+                # start_period - 2, if any so that we can use lag() in an init
+                # process
+                entity.array_lag = np.empty(0, dtype=np.dtype(lag_fields))
+            else:
+                lag_fields = []
+            entity.lag_fields = lag_fields
+
+        # compute minimal fields for each entity and set all which are not
+        # minimal to output=False
+        if minimal_output:
+            min_fields_by_entity = defaultdict(set)
+            for entity in entities.itervalues():
+                entity_lag_vars = entity.compute_lagged_fields(
+                    inspect_one_period=False)
+                for e in entity_lag_vars:
+                    min_fields_by_entity[e.name] |= entity_lag_vars[e]
+            for entity in entities.itervalues():
+                minimal_fields = min_fields_by_entity[entity.name]
+                if minimal_fields:
+                    minimal_fields.add('id')
+                    minimal_fields.add('period')
+                for field in entity.fields.in_output:
+                    if field.name not in minimal_fields:
+                        field.output = False
 
         if 'init' not in simulation_def and 'processes' not in simulation_def:
             raise SyntaxError("the 'simulation' section must have at least one "
@@ -342,17 +424,18 @@ class TilSimulation(Simulation):
                          for d in simulation_def.get('processes', [])]
         processes = []
         for ent_name, proc_defs in processes_def:
-            if ent_name != 'legislation':
-                entity = entities[ent_name]
-                used_entities.add(ent_name)
-                for proc_def in proc_defs:
-                    # proc_def is simply a process name
-                    if isinstance(proc_def, basestring):
-                        # use the default periodicity of 1
-                        proc_name, periodicity = proc_def, 1
-                    else:
-                        proc_name, periodicity = proc_def
-                    processes.append((entity.processes[proc_name], periodicity))
+            if ent_name == 'legislation':
+                continue
+            entity = entities[ent_name]
+            used_entities.add(ent_name)
+            for proc_def in proc_defs:
+                # proc_def is simply a process name
+                if isinstance(proc_def, basestring):
+                    # use the default periodicity of 1
+                    proc_name, periodicity = proc_def, 1
+                else:
+                    proc_name, periodicity = proc_def
+                processes.append((entity.processes[proc_name], periodicity))
 
         entities_list = sorted(entities.values(), key=lambda e: e.name)
         declared_entities = set(e.name for e in entities_list)
@@ -385,6 +468,7 @@ class TilSimulation(Simulation):
             output_path,
             default_entity,
             runs = runs,
+            minimal_output = minimal_output,
             legislation = legislation,
             final_stat = final_stat,
             config_log = config_log,
@@ -625,6 +709,8 @@ class TilSimulation(Simulation):
             show_top_processes(process_time, 10)
 #            if config.debug:
 #                show_top_expr()
+            print("run_console: ", run_console)
+            boum
 
             if run_console:
                 ent_name = self.default_entity
@@ -644,6 +730,15 @@ class TilSimulation(Simulation):
             self.close()
             if h5_autodump is not None:
                 h5_autodump.close()
+            if self.minimal_output:
+                output_path = self.data_sink.output_path
+                dirname = os.path.dirname(output_path)
+                try:
+                    os.remove(output_path)
+                    os.rmdir(dirname)
+                except OSError:
+                    print("WARNING: could not delete temporary directory: %r"
+                          % dirname)
 
     def run(self, run_console=False, log = False):
 
@@ -668,7 +763,7 @@ class TilSimulation(Simulation):
             sys.stdout = Tee(sys.stdout, f)
 
         for i in range(int(self.runs)):
-            self.run_single(run_console, i)
+            self.run_single(run_console = run_console, run_num = i)
 
         if log:
             sys.stdout = backup
