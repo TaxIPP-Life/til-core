@@ -58,6 +58,7 @@ setup(
     url = 'https://github.com/TaxIPP-Life/til-core',
     install_requires = [
         'numpy',
+        'pyxdg',
         ],
     message_extractors = {
         'til': [
