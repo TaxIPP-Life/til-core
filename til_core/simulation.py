@@ -709,8 +709,6 @@ class TilSimulation(Simulation):
             show_top_processes(process_time, 10)
 #            if config.debug:
 #                show_top_expr()
-            print("run_console: ", run_console)
-            boum
 
             if run_console:
                 ent_name = self.default_entity
