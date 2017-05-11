@@ -225,17 +225,17 @@ class TilSimulation(Simulation):
         for k, v in content.get('globals', {}).iteritems():
             if k == 'weight':
                 pass
-        else:
-            try:
-                if "type" in v:
-                    v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
-                else:
-                    # TODO: fields should be optional (would use all the fields
-                    # provided in the file)
-                    v["fields"] = fields_yaml_to_type(v["fields"])
-                globals_def[k] = v
-            except TypeError:
-                globals_def[k] = v
+            else:
+                try:
+                    if "type" in v:
+                        v["type"] = field_str_to_type(v["type"], "array '%s'" % k)
+                    else:
+                        # TODO: fields should be optional (would use all the fields
+                        # provided in the file)
+                        v["fields"] = fields_yaml_to_type(v["fields"])
+                    globals_def[k] = v
+                except TypeError:
+                    globals_def[k] = v
 
         simulation_def = content['simulation']
         if seed is None:
