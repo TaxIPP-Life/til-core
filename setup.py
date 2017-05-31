@@ -59,11 +59,6 @@ setup(
     install_requires = [
         'numpy',
         ],
-    message_extractors = {
-        'til': [
-            ('**.py', 'python', None),
-            ],
-        },
     packages = find_packages(),
     zip_safe = False,
     )
