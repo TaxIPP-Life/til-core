@@ -13,6 +13,7 @@ import sys
 import time
 import warnings
 
+import logging
 import numpy as np
 import tables
 import yaml
@@ -33,6 +34,9 @@ from liam2.simulation import (expand_periodic_fields, handle_imports, show_top_p
 
 # from til.utils import addmonth, time_period
 # from til.process import ExtProcess
+
+
+log = logging.getLogger(__name__)
 
 
 def get_git_head_revision(distribution_name):
@@ -841,6 +845,7 @@ til_base_model: {}""".format(time_stamp, til_git_hash, til_base_model_git_hash))
                 print('{} already exist. If you want to erase it anyway, trigger the erase option'.format(backup_path))
                 return
 
+        log.debug("Saving {} content in {}".format(output_dir, backup_path))
         shutil.copytree(output_dir, backup_path)
 
     def load_backup(self, backup_path = None, erase = False, ignore_h5 = True):
@@ -850,9 +855,7 @@ til_base_model: {}""".format(time_stamp, til_git_hash, til_base_model_git_hash))
         if not os.path.isabs(backup_path):
             backup_path = os.path.join(os.path.dirname(output_dir), backup_path)
 
-        if not os.path.exists(backup_path):
-            print('{} does not exist.'.format(backup_path))
-            return
+        assert os.path.exists(backup_path), '{} does not exist.'.format(backup_path)
 
         if not erase:
             time_stamp = datetime.datetime.fromtimestamp(time.time()).strftime('%Y-%m-%d %H:%M:%S')
