@@ -8,7 +8,7 @@ import numpy as np
 
 from liam2.expr import always, expr_eval, FunctionExpr
 
-from liam2.exprbases import FilteredExpression #, FunctionExpr)
+from liam2.exprbases import FilteredExpression
 
 from til_france.pgm.run_pension import get_pension
 
@@ -342,4 +342,4 @@ functions = {
     'month': Month,
     'pension': Pension,
     'openfisca_calculate': OpenFiscaCaller
-}
+    }
