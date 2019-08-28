@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 
 
-import ConfigParser
+import configparser
 import os
 from xdg import BaseDirectory
 
@@ -9,12 +9,12 @@ from xdg import BaseDirectory
 default_config_files_directory = BaseDirectory.save_config_path('til-core')
 
 
-class Config(ConfigParser.SafeConfigParser):
+class Config(configparser.SafeConfigParser):
     config_local_ini = None
     config_ini = None
 
     def __init__(self, config_files_directory = default_config_files_directory):
-        ConfigParser.SafeConfigParser.__init__(self)
+        configparser.SafeConfigParser.__init__(self)
         assert config_files_directory is not None
 
         config_ini = os.path.join(config_files_directory, 'config.ini')
